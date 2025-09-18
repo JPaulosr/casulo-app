@@ -49,4 +49,5 @@ with st.form("novo_pagamento"):
         }], default_headers=PAG_COLS)
         st.success(f"Pagamento registrado para **{nome_sel}** ({pid_pg})")
         st.cache_data.clear()
-        st.experimental_rerun()
+        st.rerun()
+
