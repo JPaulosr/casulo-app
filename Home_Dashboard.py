@@ -129,4 +129,4 @@ with st.expander("🔧 Diagnóstico técnico"):
         st.warning(f"Não consegui listar as abas: {e}")
     if st.button("Atualizar dados (limpar cache)"):
         st.cache_data.clear()
-        st.experimental_rerun()
+        st.rerun()
