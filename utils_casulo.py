@@ -24,34 +24,43 @@ def _norm(s: str) -> str:
 @st.cache_resource(show_spinner=False)
 def connect():
     # 1) Credenciais (nunca mutar st.secrets)
+def connect():
     sa_raw = st.secrets.get("gcp_service_account", None)
     if not sa_raw:
-        st.error("`gcp_service_account` ausente em st.secrets. Configure os secrets.")
+        st.error("`gcp_service_account` ausente em st.secrets.")
         st.stop()
 
     if isinstance(sa_raw, str):
+        import json
         try:
             sa = json.loads(sa_raw)
         except Exception:
-            st.error("`gcp_service_account` em texto inválido. Use JSON válido ou bloco TOML.")
+            st.error("`gcp_service_account` inválido. Use JSON válido ou bloco TOML.")
             st.stop()
     else:
-        sa = dict(sa_raw)  # cópia mutável
+        sa = dict(sa_raw)
 
-    sa["private_key"] = _normalize_private_key(sa.get("private_key", ""))
+    sa["private_key"] = sa.get("private_key", "").replace("\\n", "\n")
 
-    creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
+    creds = Credentials.from_service_account_info(sa, scopes=[
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive.readonly",
+    ])
     gc = gspread.authorize(creds)
 
-    # 2) Sheet ID (aceita SHEET_ID ou PLANILHA_URL)
     sid = st.secrets.get("SHEET_ID", "")
     if not sid:
         url = st.secrets.get("PLANILHA_URL", "")
         if "/d/" in url:
             sid = url.split("/d/")[1].split("/")[0]
-
     if not sid:
         st.error("Defina `SHEET_ID` (ou `PLANILHA_URL`) nos secrets.")
+        st.stop()
+
+    try:
+        return gc.open_by_key(sid)
+    except gspread.SpreadsheetNotFound:
+        st.error("SpreadsheetNotFound: confira o SHEET_ID e o compartilhamento com o e-mail da Service Account.")
         st.stop()
 
     # Debug leve (tire depois)
