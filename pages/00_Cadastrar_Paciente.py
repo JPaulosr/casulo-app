@@ -46,4 +46,4 @@ if salvar:
     }], default_headers=PAC_COLS)
     st.success(f"✅ Paciente cadastrado: **{nome}** (ID: {pid})")
     st.cache_data.clear()
-    st.button("Cadastrar outro", on_click=lambda: st.experimental_rerun())
+    st.button("Cadastrar outro", on_click=lambda: st.rerun())
