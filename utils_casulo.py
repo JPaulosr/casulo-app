@@ -13,7 +13,6 @@ SCOPES = [
 ]
 
 def _normalize_private_key(k: str) -> str:
-    # aceita chave com \n e transforma em quebras de linha reais
     return k.replace("\\n", "\n") if isinstance(k, str) else k
 
 def _norm(s: str) -> str:
@@ -23,36 +22,33 @@ def _norm(s: str) -> str:
 
 @st.cache_resource(show_spinner=False)
 def connect():
-    # 1) Credenciais (nunca mutar st.secrets)
-def connect():
+    # 1) Credenciais: aceita bloco TOML ou string JSON
     sa_raw = st.secrets.get("gcp_service_account", None)
     if not sa_raw:
         st.error("`gcp_service_account` ausente em st.secrets.")
         st.stop()
 
     if isinstance(sa_raw, str):
-        import json
         try:
             sa = json.loads(sa_raw)
         except Exception:
-            st.error("`gcp_service_account` inválido. Use JSON válido ou bloco TOML.")
+            st.error("`gcp_service_account` inválido (texto). Use JSON válido ou bloco TOML.")
             st.stop()
     else:
-        sa = dict(sa_raw)
+        sa = dict(sa_raw)  # cópia mutável
 
-    sa["private_key"] = sa.get("private_key", "").replace("\\n", "\n")
+    sa["private_key"] = _normalize_private_key(sa.get("private_key", ""))
 
-    creds = Credentials.from_service_account_info(sa, scopes=[
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive.readonly",
-    ])
+    creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
     gc = gspread.authorize(creds)
 
+    # 2) Sheet ID (SHEET_ID preferido; cai para PLANILHA_URL se existir)
     sid = st.secrets.get("SHEET_ID", "")
     if not sid:
         url = st.secrets.get("PLANILHA_URL", "")
         if "/d/" in url:
             sid = url.split("/d/")[1].split("/")[0]
+
     if not sid:
         st.error("Defina `SHEET_ID` (ou `PLANILHA_URL`) nos secrets.")
         st.stop()
@@ -60,20 +56,10 @@ def connect():
     try:
         return gc.open_by_key(sid)
     except gspread.SpreadsheetNotFound:
-        st.error("SpreadsheetNotFound: confira o SHEET_ID e o compartilhamento com o e-mail da Service Account.")
-        st.stop()
-
-    # Debug leve (tire depois)
-    st.caption(f"🔐 SA: {sa.get('client_email','?')} · Sheet: {sid}")
-
-    try:
-        return gc.open_by_key(sid)
-    except gspread.SpreadsheetNotFound:
-        st.error("❌ SpreadsheetNotFound: confira o SHEET_ID e se a planilha está compartilhada com o e-mail da Service Account (Editor).")
+        st.error("SpreadsheetNotFound: confira o SHEET_ID e se a planilha está compartilhada com o e-mail da Service Account (Editor).")
         st.stop()
 
 def read_ws(ss, title, cols=None):
-    import gspread
     try:
         ws = ss.worksheet(title)
     except gspread.WorksheetNotFound:
