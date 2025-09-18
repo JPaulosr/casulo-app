@@ -1,14 +1,14 @@
 # pages/02_Paciente_Detalhe.py
 import streamlit as st
 import pandas as pd
-from utils_casulo import connect, read_ws, foto_map
+from utils_casulo import connect, read_ws
 
 st.set_page_config(page_title="Casulo — Paciente", page_icon="📄", layout="wide")
 st.title("📄 Detalhe do Paciente")
 
 ss = connect()
-PAC_COLS = ["PacienteID","Nome","DataNascimento","Responsavel","Telefone","Email","Diagnostico",
-            "Convenio","Status","Prioridade","FotoURL","Observacoes"]
+PAC_COLS = ["PacienteID","Nome","DataNascimento","Responsavel","Telefone","Email",
+            "Diagnostico","Convenio","Status","Prioridade","FotoURL","Observacoes"]
 SES_COLS = ["SessaoID","PacienteID","Data","HoraInicio","HoraFim","Profissional","Status",
             "Tipo","ObjetivosTrabalhados","Observacoes","AnexosURL"]
 OBJ_COLS = ["ObjetivoID","PacienteID","Categoria","Descricao","NivelAtual(0-100)","ProximaMeta","UltimaRevisao"]
@@ -19,16 +19,19 @@ df_ses, _ = read_ws(ss, "Sessoes", SES_COLS)
 df_obj, _ = read_ws(ss, "Objetivos", OBJ_COLS)
 df_pag, _ = read_ws(ss, "Pagamentos", PAG_COLS)
 
-pid = st.selectbox("Escolha o PacienteID", [""] + df_pac["PacienteID"].astype(str).tolist())
-if not pid:
-    st.info("Selecione um paciente.")
+# selecionar pelo NOME
+nomes = [""] + sorted(df_pac["Nome"].astype(str).str.strip().unique().tolist())
+nome_sel = st.selectbox("Paciente", nomes)
+if not nome_sel:
+    st.info("Selecione um paciente pelo nome.")
     st.stop()
 
-p = df_pac[df_pac["PacienteID"]==pid].head(1)
-if p.empty:
+p_row = df_pac[df_pac["Nome"].astype(str).str.strip() == nome_sel].head(1)
+if p_row.empty:
     st.warning("Paciente não encontrado.")
     st.stop()
-p = p.iloc[0]
+p = p_row.iloc[0]
+pid = str(p["PacienteID"])
 
 col1, col2 = st.columns([1,3])
 with col1:
@@ -45,17 +48,16 @@ st.divider()
 tab_obj, tab_ses, tab_fin, tab_docs = st.tabs(["🎯 Objetivos","📝 Sessões","💰 Financeiro","📎 Documentos"])
 
 with tab_obj:
-    objs = df_obj[df_obj["PacienteID"]==pid].copy()
+    objs = df_obj[df_obj["PacienteID"].astype(str) == pid].copy()
     st.dataframe(objs, use_container_width=True, hide_index=True)
 
 with tab_ses:
-    ses = df_ses[df_ses["PacienteID"]==pid].copy()
+    ses = df_ses[df_ses["PacienteID"].astype(str) == pid].copy()
     st.dataframe(ses[["Data","HoraInicio","HoraFim","Profissional","Status","Tipo","ObjetivosTrabalhados","Observacoes"]], use_container_width=True, hide_index=True)
 
 with tab_fin:
-    fin = df_pag[df_pag["PacienteID"]==pid].copy()
+    fin = df_pag[df_pag["PacienteID"].astype(str) == pid].copy()
     st.dataframe(fin[["Data","Forma","Bruto","Liquido","TaxaValor","Referencia","Obs"]], use_container_width=True, hide_index=True)
 
 with tab_docs:
-    # se quiser separar em uma aba "Documentos" na planilha
     st.info("Anexe links de documentos na aba Documentos (URL). Podemos integrar upload depois.")
