@@ -37,23 +37,13 @@ if salvar:
     if not nome.strip():
         st.error("Informe o **Nome**.")
         st.stop()
-
     pid = new_id("P")
     append_rows(ws_pac, [{
-        "PacienteID": pid,
-        "Nome": nome.strip(),
-        "DataNascimento": nasc.strip(),
-        "Responsavel": resp.strip(),
-        "Telefone": tel.strip(),
-        "Email": email.strip(),
-        "Diagnostico": diag.strip(),
-        "Convenio": conv.strip(),
-        "Status": status.strip(),
-        "Prioridade": prio.strip(),
-        "FotoURL": foto.strip(),
-        "Observacoes": obs.strip(),
+        "PacienteID": pid, "Nome": nome.strip(), "DataNascimento": nasc.strip(),
+        "Responsavel": resp.strip(), "Telefone": tel.strip(), "Email": email.strip(),
+        "Diagnostico": diag.strip(), "Convenio": conv.strip(), "Status": status.strip(),
+        "Prioridade": prio.strip(), "FotoURL": foto.strip(), "Observacoes": obs.strip(),
     }], default_headers=PAC_COLS)
-
     st.success(f"✅ Paciente cadastrado: **{nome}** (ID: {pid})")
     st.cache_data.clear()
     st.button("Cadastrar outro", on_click=lambda: st.experimental_rerun())
