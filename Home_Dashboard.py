@@ -22,7 +22,6 @@ set_bg_logo(
 
 st.title("🦋 Casulo | Dashboard")
 
-
 # ---------- CSS leve p/ chips e cards ----------
 st.markdown("""
 <style>
