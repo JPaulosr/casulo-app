@@ -5,20 +5,23 @@ import streamlit as st
 import pandas as pd
 from datetime import date, datetime, timedelta, time
 from utils_casulo import connect, read_ws
-from utils_ui import set_bg_logo  # ⬅️ importa o helper do logo
+from utils_ui import set_bg_logo
 
 st.set_page_config(page_title="Casulo — Dashboard", page_icon="🦋", layout="wide")
 
-# ⬇️ aplica o logo como marca d’água (antes do título)
 set_bg_logo(
     url="https://res.cloudinary.com/db8ipmete/image/upload/v1758238516/Captura_de_tela_2025-09-18_151051_cvqmh9.png",
-    opacity=0.06,      # ajuste fino: 0.04–0.10
-    size="55%",        # ex.: "contain", "300px", "70%"
-    position="center", # ex.: "bottom right", "top 10% right 10%"
-    fixed=True
+    scope="container",     # só no bloco central
+    opacity=0.06,
+    size="60%",
+    position="center",
+    fixed=True,
+    blur_px=1.5,
+    overlay="radial-gradient(circle at 50% 50%, rgba(0,0,0,.38), rgba(0,0,0,.68) 60%, rgba(0,0,0,.78) 100%)"
 )
 
 st.title("🦋 Casulo | Dashboard")
+
 
 # ---------- CSS leve p/ chips e cards ----------
 st.markdown("""
