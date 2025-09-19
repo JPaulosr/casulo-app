@@ -1,137 +1,86 @@
-# utils_telegram.py
-# Centraliza lógica do Telegram: leitura de secrets/env/override, teste e envio.
-
+# -*- coding: utf-8 -*-
+# utils_telegram.py  (Casulo)
 import os
 import requests
 import streamlit as st
 
-# --- Fallback via variáveis de ambiente ---
-TELEGRAM_TOKEN_FALLBACK = (
-    os.getenv("TELEGRAM_TOKEN", "") or os.getenv("TELEGRAM_BOT_TOKEN", "")
-).strip()
+# Quais chaves vamos aceitar (secrets e/ou env). Nada hardcoded.
+_TOKEN_KEYS  = ("TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN")
+_CHATID_KEYS = ("TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID_CASULO")
 
-TELEGRAM_CHATID_FALLBACK = (
-    os.getenv("TELEGRAM_CHAT_ID", "")
-    or os.getenv("TELEGRAM_CHAT_ID_CASULO", "")
-    or os.getenv("TELEGRAM_CHAT_ID_PADRAO", "")
-).strip()
-
-_TELEGRAM_KEY_CANDIDATES = ("TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN")
-_CHATID_KEY_CANDIDATES = ("TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID_CASULO", "TELEGRAM_CHAT_ID_PADRAO")
-
-
-def _tg_token() -> str:
-    # 1) override via UI (session_state)
-    ov = (st.session_state.get("TELEGRAM_TOKEN_OVERRIDE", "") or "").strip()
-    if ov:
-        return ov
-    # 2) secrets
+def _read_first(keys: tuple[str, ...]) -> str:
+    """lê a 1ª chave que existir (st.secrets ou env); retorna '' se nada achado"""
+    # 1) secrets
     try:
-        for k in _TELEGRAM_KEY_CANDIDATES:
+        for k in keys:
             v = (st.secrets.get(k, "") or "").strip()
             if v:
                 return v
     except Exception:
         pass
-    # 3) env
-    return TELEGRAM_TOKEN_FALLBACK
+    # 2) env (para dev local)
+    for k in keys:
+        v = (os.getenv(k, "") or "").strip()
+        if v:
+            return v
+    return ""
 
+def tg_token() -> str:
+    return _read_first(_TOKEN_KEYS)
 
-def _tg_chat_id() -> str:
-    # 1) override via UI (session_state)
-    ov = (st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE", "") or "").strip()
-    if ov:
-        return ov
-    # 2) secrets
-    try:
-        for k in _CHATID_KEY_CANDIDATES:
-            v = (st.secrets.get(k, "") or "").strip()
-            if v:
-                return v
-    except Exception:
-        pass
-    # 3) env
-    return TELEGRAM_CHATID_FALLBACK
-
+def tg_chat_id() -> str:
+    return _read_first(_CHATID_KEYS)
 
 def tg_ready() -> tuple[bool, bool, dict]:
-    """retorna (token_ok, chat_ok, info_debug)"""
-    tok = _tg_token()
-    cid = _tg_chat_id()
-    info = {
-        "prefer_keys_token": list(_TELEGRAM_KEY_CANDIDATES),
-        "prefer_keys_chat": list(_CHATID_KEY_CANDIDATES),
-        "token_source": "override" if st.session_state.get("TELEGRAM_TOKEN_OVERRIDE") else ("secrets/env" if tok else "MISSING"),
-        "chat_source": "override" if st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE") else ("secrets/env" if cid else "MISSING"),
+    tok = tg_token()
+    cid = tg_chat_id()
+    dbg = {
+        "token_ok": bool(tok),
+        "chat_ok":  bool(cid),
+        "token_keys_tried": list(_TOKEN_KEYS),
+        "chat_keys_tried":  list(_CHATID_KEYS),
         "token_masked": (tok[:6] + "…" + tok[-4:]) if tok else "",
         "chat_id": cid,
     }
-    return bool(tok), bool(cid), info
+    return bool(tok), bool(cid), dbg
 
-
-def tg_send_pdf(file_bytes: bytes, filename: str, caption: str = "") -> tuple[bool, str]:
-    token_ok, chat_ok, dbg = tg_ready()
-    if not (token_ok and chat_ok):
-        return (
-            False,
-            f"Telegram indisponível. Token OK? {token_ok} | ChatID OK? {chat_ok} | "
-            f"Procuradas: token {dbg['prefer_keys_token']} chat {dbg['prefer_keys_chat']}"
-        )
+def tg_send_message(text: str, chat_id: str | None = None) -> tuple[bool, str]:
+    token = tg_token()
+    chat  = (chat_id or tg_chat_id())
+    if not token or not chat:
+        return False, "Token/ChatID ausente"
     try:
-        url = f"https://api.telegram.org/bot{_tg_token()}/sendDocument"
-        files = {"document": (filename, file_bytes, "application/pdf")}
-        data = {"chat_id": _tg_chat_id(), "caption": (caption or "")[:1024]}
-        r = requests.post(url, data=data, files=files, timeout=60)
-        ok = r.ok and r.json().get("ok")
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+        r = requests.post(url, json=payload, timeout=30)
+        ok = r.ok and r.json().get("ok", False)
         return (bool(ok), "" if ok else f"HTTP {r.status_code}: {r.text}")
     except Exception as e:
         return False, f"Erro de rede: {e}"
 
-
-def tg_test_message(text: str = "Teste ✅") -> tuple[bool, str]:
-    token_ok, chat_ok, _ = tg_ready()
-    if not (token_ok and chat_ok):
-        return False, "Token/Chat ID ausente."
+def tg_send_document(file_bytes: bytes, filename: str, caption: str = "", chat_id: str | None = None) -> tuple[bool, str]:
+    token = tg_token()
+    chat  = (chat_id or tg_chat_id())
+    if not token or not chat:
+        return False, "Token/ChatID ausente"
     try:
-        url = f"https://api.telegram.org/bot{_tg_token()}/sendMessage"
-        payload = {"chat_id": _tg_chat_id(), "text": text, "parse_mode": "HTML"}
-        r = requests.post(url, json=payload, timeout=30)
-        ok = r.ok and r.json().get("ok")
+        url = f"https://api.telegram.org/bot{token}/sendDocument"
+        files = {"document": (filename, file_bytes, "application/pdf")}
+        data = {"chat_id": chat, "caption": caption[:1024]}
+        r = requests.post(url, data=data, files=files, timeout=60)
+        ok = r.ok and r.json().get("ok", False)
         return (bool(ok), "" if ok else f"HTTP {r.status_code}: {r.text}")
     except Exception as e:
-        return False, str(e)
+        return False, f"Erro de rede: {e}"
 
-
-def tg_debug_expander():
-    """Expander pronto com diagnóstico + override + teste de envio."""
-    with st.expander("🔧 Diagnóstico Telegram"):
-        token_ok, chat_ok, dbg = tg_ready()
-        st.write(f"Token OK? **{token_ok}** | ChatID OK? **{chat_ok}**")
-        st.caption(f"Fonte token: {dbg['token_source']} | Fonte chat: {dbg['chat_source']}")
-        if token_ok:
-            st.caption(f"Token (mascarado): {dbg['token_masked']}")
-        if chat_ok:
-            st.caption(f"Chat ID: {dbg['chat_id']}")
-
-        try:
-            st.caption("Chaves disponíveis em st.secrets (somente nomes):")
-            st.code(", ".join(sorted(list(st.secrets.keys()))))
-        except Exception as e:
-            st.caption(f"Não foi possível listar st.secrets ({e})")
-
-        st.divider()
-        st.caption("👉 Override temporário (usa sessão atual do navegador):")
-        tok_in = st.text_input("Token do Bot (override temporário)", type="password",
-                               value=st.session_state.get("TELEGRAM_TOKEN_OVERRIDE", ""))
-        cid_in = st.text_input("Chat ID (override temporário)",
-                               value=st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE", ""))
-        col_a, col_b = st.columns(2)
-        with col_a:
-            if st.button("Aplicar overrides"):
-                st.session_state["TELEGRAM_TOKEN_OVERRIDE"] = (tok_in or "").strip()
-                st.session_state["TELEGRAM_CHAT_ID_OVERRIDE"] = (cid_in or "").strip()
-                st.success("Overrides aplicados. Agora teste o envio.")
-        with col_b:
-            if st.button("Testar envio de mensagem"):
-                ok, err = tg_test_message("Teste ✅ (debug)")
-                st.success("Mensagem enviada! ✅") if ok else st.error(f"Falhou: {err}")
+def tg_diag_markdown() -> str:
+    """Bloco pronto para exibir na UI de diagnóstico."""
+    tok_ok, cid_ok, dbg = tg_ready()
+    lines = [
+        f"**Token OK?** {tok_ok}  |  **ChatID OK?** {cid_ok}",
+        f"**Chaves buscadas (token):** `{dbg['token_keys_tried']}`",
+        f"**Chaves buscadas (chat):** `{dbg['chat_keys_tried']}`",
+        f"**Token (mascarado):** `{dbg['token_masked']}`",
+        f"**ChatID lido:** `{dbg['chat_id']}`",
+    ]
+    return "\n\n".join(lines)
