@@ -1,9 +1,11 @@
 # pages/01_Pacientes.py
 # -*- coding: utf-8 -*-
-import re
+import os, re
 from datetime import datetime
 import pandas as pd
 import streamlit as st
+import gspread
+from gspread.exceptions import APIError
 
 from utils_casulo import connect, read_ws, append_rows, new_id
 
@@ -11,18 +13,13 @@ st.set_page_config(page_title="Casulo — Pacientes", page_icon="👨‍👩‍�
 st.title("👨‍👩‍👧 Pacientes")
 
 # =========================
-# Conexão / leitura
+# Constantes / schema
 # =========================
-ss = connect()
 PAC_COLS = [
     "PacienteID","Nome","DataNascimento","Responsavel","Telefone","Email",
     "Diagnostico","Convenio","Status","Prioridade","FotoURL","Observacoes"
 ]
-df, ws = read_ws(ss, "Pacientes", PAC_COLS)
-df = (df if isinstance(df, pd.DataFrame) else pd.DataFrame(columns=PAC_COLS)).copy()
-df = df.reindex(columns=PAC_COLS).fillna("")
 
-# Normalizações leves
 def _to_date_str(s):
     if not s: return ""
     s = str(s).strip()
@@ -34,6 +31,75 @@ def _to_date_str(s):
             pass
     return s
 
+# =========================
+# Conexão + leitura robusta
+# =========================
+ss = connect()
+
+def _safe_load_sheet(ss, title: str, cols: list[str]) -> tuple[pd.DataFrame, gspread.Worksheet]:
+    """Tenta read_ws; se falhar, cria a aba e cabeçalhos. Exibe diagnósticos úteis."""
+    try:
+        df, ws = read_ws(ss, title, cols)
+        # garante ordem/colunas
+        df = (df if isinstance(df, pd.DataFrame) else pd.DataFrame(columns=cols))
+        df = df.reindex(columns=cols).fillna("")
+        return df, ws
+    except APIError as e:
+        st.warning("Não consegui ler a aba. Vou diagnosticar e tentar recuperar automaticamente…")
+        # Lista abas existentes (se possível)
+        existing = []
+        try:
+            existing = [w.title for w in ss.worksheets()]
+        except Exception:
+            pass
+
+        if existing:
+            st.info(f"Aba(s) existentes na planilha: {', '.join(existing)}")
+
+        if title not in existing:
+            st.info(f"A aba **{title}** não existe. Vou criar agora com o cabeçalho padrão.")
+            try:
+                ws = ss.add_worksheet(title=title, rows=200, cols=max(20, len(cols)))
+                # escreve cabeçalho
+                ws.update("A1", [cols])
+                st.success(f"Aba **{title}** criada com sucesso ✅")
+                # retorna df vazio com schema
+                return pd.DataFrame(columns=cols), ws
+            except APIError as e_create:
+                _render_perm_help(e_create)
+                raise
+        else:
+            # A aba existe, mas houve outro erro (muito provavelmente permissão)
+            _render_perm_help(e)
+            raise
+    except Exception as e:
+        st.error(f"Erro inesperado ao abrir a planilha: {e}")
+        raise
+
+def _render_perm_help(err: Exception):
+    st.error("Falha de acesso à planilha (provável permissão/escopo).")
+    # Tenta mostrar o email da SA se estiver em secrets
+    sa_email = None
+    try:
+        sa_email = st.secrets.get("gcp_service_account", {}).get("client_email", None)
+    except Exception:
+        pass
+    if not sa_email:
+        # alternativas de chaves usuais
+        for key in ("service_account", "gspread_service_account", "gcp"):
+            try:
+                sa_email = st.secrets.get(key, {}).get("client_email", None) or sa_email
+            except Exception:
+                pass
+    if sa_email:
+        st.info(f"Compartilhe a planilha com o e-mail da Service Account: **{sa_email}** (permissão de Editor).")
+    else:
+        st.info("Compartilhe a planilha com o e-mail da sua Service Account (aquele `...iam.gserviceaccount.com`).")
+
+    st.caption("Depois de compartilhar, volte e atualize a página.")
+
+# Carrega (ou cria) a aba
+df, ws = _safe_load_sheet(ss, "Pacientes", PAC_COLS)
 df["DataNascimento"] = df["DataNascimento"].map(_to_date_str)
 
 # =========================
@@ -112,18 +178,16 @@ cols_show = [
     "Diagnostico","Convenio","Status","Prioridade","FotoURL","Observacoes"
 ]
 
-# --- Normalização forte de tipos (evita erro do data_editor) ---
+# Normalização forte de tipos (evita erro do data_editor)
 df_view = df_view.copy().reindex(columns=PAC_COLS).fillna("")
-TEXT_COLS = PAC_COLS[:]  # todas são texto aqui
-for c in TEXT_COLS:
+for c in PAC_COLS:
     df_view[c] = df_view[c].astype(str)
 
-# --- Opções dinâmicas — incluem existentes + padrão + vazio ---
+# Opções dinâmicas
 status_defaults = ["Ativo", "Pausa", "Alta"]
 prio_defaults   = ["Normal", "Alta", "Urgente"]
 status_opts = sorted(set(df_view["Status"].unique()) | set(status_defaults) | {""})
 prio_opts   = sorted(set(df_view["Prioridade"].unique()) | set(prio_defaults) | {""})
-
 df_view.loc[~df_view["Status"].isin(status_opts), "Status"] = ""
 df_view.loc[~df_view["Prioridade"].isin(prio_opts), "Prioridade"] = ""
 
@@ -143,14 +207,13 @@ edited_df = st.data_editor(
         "Convenio": st.column_config.TextColumn("Convênio"),
         "Status": st.column_config.SelectboxColumn("Status", options=status_opts),
         "Prioridade": st.column_config.SelectboxColumn("Prioridade", options=prio_opts),
-        # TextColumn é mais permissivo; troque para LinkColumn quando estiver tudo limpo
         "FotoURL": st.column_config.TextColumn("FotoURL", help="URL de imagem (Drive/Cloudinary)"),
         "Observacoes": st.column_config.TextColumn("Observações", width="large"),
     },
     key="grid_pacientes",
 )
 
-# Reconstruir df mesclado (aplica alterações do editor ao df original por PacienteID)
+# Reconstruir df mesclado
 df_to_save = df.copy()
 orig_by_id = df_to_save.set_index("PacienteID")
 edit_by_id = edited_df.set_index("PacienteID")
@@ -169,6 +232,9 @@ with save_col1:
             st.success("Alterações salvas na planilha ✅")
             st.cache_data.clear()
             st.rerun()
+        except APIError as e:
+            _render_perm_help(e)
+            st.error("Erro do Google Sheets ao salvar.")
         except Exception as e:
             st.error(f"Erro ao salvar: {e}")
 
@@ -187,6 +253,9 @@ with save_col2:
             st.success(f"{len(ids_para_excluir)} registro(s) excluído(s) ✅")
             st.cache_data.clear()
             st.rerun()
+        except APIError as e:
+            _render_perm_help(e)
+            st.error("Erro do Google Sheets ao excluir.")
         except Exception as e:
             st.error(f"Erro ao excluir: {e}")
 
@@ -263,5 +332,8 @@ with st.form("novo_paciente"):
                 st.success(f"Paciente cadastrado: {nome} ({pid}) ✅")
                 st.cache_data.clear()
                 st.rerun()
+            except APIError as e:
+                _render_perm_help(e)
+                st.error("Erro do Google Sheets ao salvar novo paciente.")
             except Exception as e:
                 st.error(f"Erro ao salvar novo paciente: {e}")
