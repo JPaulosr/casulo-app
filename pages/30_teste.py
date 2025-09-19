@@ -32,7 +32,16 @@ def _to_date_str(s):
     return s
 
 # =========================
-# Telegram helpers (mesmo padrão do 02)
+# Logo padrão (placeholder)
+# =========================
+DEFAULT_LOGO_URL = "https://res.cloudinary.com/db8ipmete/image/upload/v1752463905/Logo_sal%C3%A3o_kz9y9c.png"
+
+def _photo_or_logo(url: str | None) -> str:
+    u = (url or "").strip()
+    return u if u else DEFAULT_LOGO_URL
+
+# =========================
+# Telegram helpers
 # =========================
 TELEGRAM_TOKEN_FALLBACK = ""
 TELEGRAM_CHATID_FALLBACK = ""
@@ -51,10 +60,10 @@ def _tg_chat_id():
     except Exception:
         return TELEGRAM_CHATID_FALLBACK
 
-def tg_send_photo(file_bytes: bytes | None, filename: str = "foto.jpg",
+def tg_send_photo(file_bytes: bytes | None = None, filename: str = "foto.jpg",
                   photo_url: str | None = None, caption: str = "") -> tuple[bool, str]:
     """
-    Envia foto ao Telegram. Se file_bytes for None, usa photo_url.
+    Envia foto ao Telegram. Use EITHER file_bytes OU photo_url.
     Retorna (ok, erro).
     """
     token = _tg_token()
@@ -64,20 +73,18 @@ def tg_send_photo(file_bytes: bytes | None, filename: str = "foto.jpg",
 
     try:
         url = f"https://api.telegram.org/bot{token}/sendPhoto"
-        if file_bytes:
+        if file_bytes is not None:
             files = {"photo": (filename, file_bytes, "image/jpeg")}
             data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
             r = requests.post(url, data=data, files=files, timeout=60)
         else:
-            data = {"chat_id": chat_id, "photo": photo_url, "caption": caption, "parse_mode": "HTML"}
+            data = {"chat_id": chat_id, "photo": (photo_url or DEFAULT_LOGO_URL),
+                    "caption": caption, "parse_mode": "HTML"}
             r = requests.post(url, data=data, timeout=60)
         ok = (r.status_code == 200 and r.json().get("ok"))
         return ok, "" if ok else r.text
     except Exception as e:
         return False, str(e)
-
-# Logo padrão quando não houver foto
-DEFAULT_LOGO_URL = "https://res.cloudinary.com/db8ipmete/image/upload/v1752463905/Logo_sal%C3%A3o_kz9y9c.png"
 
 # =========================
 # UI CSS
@@ -293,7 +300,7 @@ edited_df = st.data_editor(
     key="grid_pacientes",
 )
 
-# Mescla para salvar
+# Mescla para salvar (grade)
 df_to_save = df.copy()
 orig_by_id = df_to_save.set_index("PacienteID")
 edit_by_id = edited_df.set_index("PacienteID")
@@ -339,7 +346,24 @@ with save_col2:
             st.error(f"Erro ao excluir: {e}")
 
 # =========================
-# Detalhes rápidos (visual moderno)
+# Helpers de atualização por ID
+# =========================
+def _update_row_by_id(ws: gspread.Worksheet, df_full: pd.DataFrame, record: dict):
+    """Atualiza exatamente 1 linha na planilha (match por PacienteID)."""
+    pid = str(record.get("PacienteID","")).strip()
+    if not pid:
+        raise ValueError("PacienteID vazio para update.")
+
+    idx = df_full.index[df_full["PacienteID"] == pid]
+    if len(idx) == 0:
+        raise ValueError(f"PacienteID {pid} não encontrado.")
+    row_idx = int(idx[0]) + 2  # +2 por causa do cabeçalho
+
+    row_vals = [record.get(col, "") for col in PAC_COLS]
+    ws.update(f"A{row_idx}:L{row_idx}", [row_vals])
+
+# =========================
+# Detalhes rápidos + Edição individual
 # =========================
 st.markdown("---")
 st.subheader("🔍 Detalhes rápidos")
@@ -353,17 +377,13 @@ else:
         with st.expander(f"{nome} — {status} • {prio}"):
             cimg, cinfo = st.columns([1,3])
             with cimg:
-                foto = str(row.get("FotoURL","")).strip()
-                if foto:
-                    try: st.image(foto, caption=None, use_container_width=True)
-                    except Exception: st.caption("Não foi possível carregar a imagem.")
-                else:
-                    st.markdown(f"""
-                        <div class="avatar" style="display:flex;align-items:center;justify-content:center;font-weight:800;">
-                            {nome[0:2].upper()}
-                        </div>
-                    """, unsafe_allow_html=True)
-                    st.caption("Sem foto")
+                foto_url_show = _photo_or_logo(row.get("FotoURL"))
+                try:
+                    st.image(foto_url_show, caption=None, use_container_width=True)
+                except Exception:
+                    st.image(DEFAULT_LOGO_URL, caption=None, use_container_width=True)
+                    st.caption("Não foi possível carregar a imagem do paciente.")
+
             with cinfo:
                 st.markdown(
                     " ".join([
@@ -381,6 +401,49 @@ else:
                 st.markdown(f"**Convênio:** {row.get('Convenio') or '—'}")
                 st.markdown(f"**Diagnóstico:** {row.get('Diagnostico') or '—'}")
                 st.markdown(f"**Observações:** {row.get('Observacoes') or '—'}")
+
+            # --------- Editor individual ----------
+            with st.form(f"edit_{row['PacienteID']}"):
+                st.markdown("**✏️ Editar cadastro**")
+                c1, c2 = st.columns(2)
+                with c1:
+                    e_nome = st.text_input("Nome", value=row.get("Nome",""))
+                    e_nasc = st.text_input("Nascimento (DD/MM/AAAA)", value=row.get("DataNascimento",""))
+                    e_resp = st.text_input("Responsável", value=row.get("Responsavel",""))
+                    e_tel  = st.text_input("Telefone", value=row.get("Telefone",""))
+                    e_mail = st.text_input("Email", value=row.get("Email",""))
+                    e_conv = st.text_input("Convênio", value=row.get("Convenio",""))
+                with c2:
+                    e_diag = st.text_area("Diagnóstico(s)", value=row.get("Diagnostico",""))
+                    e_status = st.selectbox("Status", ["Ativo","Pausa","Alta"], index=["Ativo","Pausa","Alta"].index(status) if status in ["Ativo","Pausa","Alta"] else 0)
+                    e_prio = st.selectbox("Prioridade", ["Normal","Alta","Urgente"], index=["Normal","Alta","Urgente"].index(prio) if prio in ["Normal","Alta","Urgente"] else 0)
+                    e_foto = st.text_input("FotoURL", value=row.get("FotoURL",""))
+                    e_obs  = st.text_area("Observações", value=row.get("Observacoes",""))
+                submit_edit = st.form_submit_button("💾 Salvar este paciente")
+
+                if submit_edit:
+                    try:
+                        rec = {
+                            "PacienteID": row["PacienteID"],
+                            "Nome": e_nome.strip(),
+                            "DataNascimento": _to_date_str(e_nasc),
+                            "Responsavel": e_resp.strip(),
+                            "Telefone": e_tel.strip(),
+                            "Email": e_mail.strip(),
+                            "Diagnostico": e_diag.strip(),
+                            "Convenio": (e_conv.strip() or "Particular"),
+                            "Status": e_status,
+                            "Prioridade": e_prio,
+                            "FotoURL": e_foto.strip(),
+                            "Observacoes": e_obs.strip(),
+                        }
+                        _update_row_by_id(ws, df, rec)
+                        st.success("Cadastro atualizado ✅")
+                        st.cache_data.clear(); st.rerun()
+                    except APIError as e:
+                        _render_perm_help(e); st.error("Erro do Google Sheets ao atualizar.")
+                    except Exception as e:
+                        st.error(f"Erro ao atualizar: {e}")
 
 # =========================
 # Cadastro — Novo paciente (upload + Telegram)
@@ -424,7 +487,7 @@ with st.form("novo_paciente"):
                     "Convenio": (conv or "").strip() or "Particular",
                     "Status": status,
                     "Prioridade": prio,
-                    "FotoURL": (foto_url or "").strip(),  # se quiser, depois podemos preencher com URL do upload em Cloudinary/Drive
+                    "FotoURL": (foto_url or "").strip(),
                     "Observacoes": (obs or "").strip()
                 }
                 append_rows(ws, [record], default_headers=PAC_COLS)
@@ -444,19 +507,15 @@ with st.form("novo_paciente"):
                     f"🎂 <b>Nascimento:</b> {_to_date_str(nasc) or '—'}"
                 )
 
-                # Decide o que enviar como foto
-                photo_bytes, photo_url_to_send = None, None
+                # Decide o que enviar como foto (UMA única chamada)
                 if foto_upload is not None:
-                    # usa bytes do upload
                     photo_bytes = foto_upload.read()
                     fname = getattr(foto_upload, "name", "foto.jpg")
-                    ok_tg, err_tg = tg_send_photo(photo_bytes, filename=fname, photo_url=None, caption=caption)
+                    ok_tg, err_tg = tg_send_photo(file_bytes=photo_bytes, filename=fname, photo_url=None, caption=caption)
                 elif (foto_url or "").strip():
-                    ok_tg, err_tg = tg_send_photo(None, photo_url=None, caption=caption)  # evitamos confusão…
-                    # …mas aqui queremos URL:
-                    ok_tg, err_tg = tg_send_photo(None, filename="foto.jpg", photo_url=foto_url.strip(), caption=caption)
+                    ok_tg, err_tg = tg_send_photo(file_bytes=None, photo_url=foto_url.strip(), caption=caption)
                 else:
-                    ok_tg, err_tg = tg_send_photo(None, filename="logo.jpg", photo_url=DEFAULT_LOGO_URL, caption=caption)
+                    ok_tg, err_tg = tg_send_photo(file_bytes=None, photo_url=DEFAULT_LOGO_URL, caption=caption)
 
                 if ok_tg:
                     st.toast("Mensagem enviada ao Telegram ✅", icon="✅")
