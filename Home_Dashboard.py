@@ -7,38 +7,57 @@ from datetime import date, datetime, timedelta, time
 from utils_casulo import connect, read_ws
 from utils_ui import set_bg_logo
 
+# -------------------------------------------------
+# Config & marca d'água (selo no canto)
+# -------------------------------------------------
 st.set_page_config(page_title="Casulo — Dashboard", page_icon="🦋", layout="wide")
 
 set_bg_logo(
     url="https://res.cloudinary.com/db8ipmete/image/upload/v1758238516/Captura_de_tela_2025-09-18_151051_cvqmh9.png",
-    scope="container",     # só no bloco central
-    opacity=0.06,
-    size="60%",
-    position="center",
+    scope="app",                 # aplica no app todo (selo discreto)
+    opacity=0.12,
+    size="170px",
+    position="bottom 3% right 3%",
     fixed=True,
-    blur_px=1.5,
-    overlay="radial-gradient(circle at 50% 50%, rgba(0,0,0,.38), rgba(0,0,0,.68) 60%, rgba(0,0,0,.78) 100%)"
+    blur_px=0,
+    overlay=None
 )
 
 st.title("🦋 Casulo | Dashboard")
 
-# ---------- CSS leve p/ chips e cards ----------
+# -------------------------------------------------
+# CSS (chips/cards dark clean)
+# -------------------------------------------------
 st.markdown("""
 <style>
+/* chips de status */
 .badge {display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600;}
-.st-status-agendada  {background:#f1f5f9;color:#0f172a;}
-.st-status-confirmada{background:#dcfce7;color:#166534;}
-.st-status-realizada {background:#e0e7ff;color:#3730a3;}
-.st-status-falta     {background:#fee2e2;color:#991b1b;}
-.st-status-cancelada {background:#f5f5f5;color:#525252;text-decoration:line-through;}
-.small {font-size:12px;color:#475569}
-.item {padding:10px 12px;border:1px solid #e5e7eb;border-radius:10px;margin-bottom:8px;}
-.item:hover {background:#fafafa}
-.hdim {opacity:0.75}
+.st-status-agendada  {background:rgba(148,163,184,.20); color:#e2e8f0;}
+.st-status-confirmada{background:rgba(34,197,94,.18);  color:#86efac;}
+.st-status-realizada {background:rgba(99,102,241,.18); color:#c7d2fe;}
+.st-status-falta     {background:rgba(239,68,68,.18);  color:#fecaca;}
+.st-status-cancelada {background:rgba(100,116,139,.18);color:#cbd5e1; text-decoration:line-through;}
+
+/* cards das listagens */
+.small {font-size:12px;color:#94a3b8}
+.item {
+  padding:10px 12px;
+  border:1px solid rgba(148,163,184,.18);
+  border-radius:12px;
+  margin-bottom:8px;
+  background:rgba(255,255,255,.03);
+}
+.item:hover {background:rgba(255,255,255,.05)}
+.hdim {opacity:.85}
+
+/* menos respiro no topo do container */
+.main .block-container {padding-top: 1.1rem;}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- helpers ----------
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
 def to_date(s):
     if s is None: return None
     s = str(s).strip()
@@ -75,7 +94,9 @@ def week_bounds(anchor: date):
 
 WEEKDAYS_PT = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"]
 
-# ---------- conexão & colunas ----------
+# -------------------------------------------------
+# Conexão & colunas
+# -------------------------------------------------
 ss = connect()
 PAC_COLS = ["PacienteID","Nome","DataNascimento","Responsavel","Telefone","Email",
             "Diagnostico","Convenio","Status","Prioridade","FotoURL","Observacoes"]
@@ -88,7 +109,9 @@ df_pac, _ = read_ws(ss, "Pacientes", PAC_COLS)
 df_ses, _ = read_ws(ss, "Sessoes",   SES_COLS)
 df_pag, _ = read_ws(ss, "Pagamentos",PAG_COLS)
 
-# ---------- normalizações ----------
+# -------------------------------------------------
+# Normalizações
+# -------------------------------------------------
 df_pac = df_pac.copy()
 df_ses = df_ses.copy()
 df_pag = df_pag.copy()
@@ -102,12 +125,16 @@ df_pag["__dt"] = df_pag.get("Data","").apply(to_date) if "Data" in df_pag else N
 df_pag["__bruto"]   = df_pag.get("Bruto",0).apply(to_float)
 df_pag["__liquido"] = df_pag.get("Liquido",0).apply(to_float)
 
-# ---------- datas base ----------
+# -------------------------------------------------
+# Datas base
+# -------------------------------------------------
 hoje = date.today()
 ini_sem, fim_sem = week_bounds(hoje)
 mes_ini = hoje.replace(day=1)
 
-# ---------- KPIs ----------
+# -------------------------------------------------
+# KPIs
+# -------------------------------------------------
 ativos = int((df_pac["__status_norm"] == "ativo").sum()) if not df_pac.empty else 0
 
 semana_atual   = df_ses[(df_ses["__dt"] >= ini_sem) & (df_ses["__dt"] <= fim_sem)] if "__dt" in df_ses else df_ses.iloc[0:0]
@@ -128,7 +155,9 @@ c4.metric("🧾 Pagamentos no mês", qtd_pags_mes)
 
 st.divider()
 
-# ---------- Navegação semanal ----------
+# -------------------------------------------------
+# Navegação semanal
+# -------------------------------------------------
 if "week_offset" not in st.session_state:
     st.session_state.week_offset = 0
 col_prev, col_today, col_next = st.columns(3)
@@ -143,12 +172,13 @@ anchor = hoje + timedelta(weeks=st.session_state.week_offset)
 sem_ini, sem_fim = week_bounds(anchor)
 st.subheader(f"🗓️ Agenda da semana ({sem_ini.strftime('%d/%m')} → {sem_fim.strftime('%d/%m')})")
 
-# filtro por profissional/status (leves)
+# filtros leves
 colF1, colF2 = st.columns([1,1])
 with colF1:
     prof_f = st.text_input("Filtrar por profissional (opcional)", "")
 with colF2:
-    status_f = st.multiselect("Status", ["Agendada","Confirmada","Realizada","Falta","Cancelada"], default=["Agendada","Confirmada","Realizada"])
+    status_f = st.multiselect("Status", ["Agendada","Confirmada","Realizada","Falta","Cancelada"],
+                              default=["Agendada","Confirmada","Realizada"])
 
 semana = df_ses[(df_ses["__dt"] >= sem_ini) & (df_ses["__dt"] <= sem_fim)].copy()
 if prof_f.strip():
@@ -201,7 +231,9 @@ except Exception:
 
 st.divider()
 
-# ---------- Hoje & próximos 7 dias (lista bonita) ----------
+# -------------------------------------------------
+# Hoje & próximos 7 dias (lista)
+# -------------------------------------------------
 st.subheader("📅 Hoje & próximos 7 dias")
 prox = df_ses[(df_ses["__dt"] >= hoje) & (df_ses["__dt"] <= hoje + timedelta(days=7))].copy()
 if not prox.empty and "PacienteID" in prox and "PacienteID" in df_pac:
@@ -236,7 +268,9 @@ else:
 
 st.divider()
 
-# ---------- Gráficos simples de receita ----------
+# -------------------------------------------------
+# Gráficos simples de receita
+# -------------------------------------------------
 st.subheader("💵 Receita do mês")
 if pag_mes.empty:
     st.info("Sem pagamentos neste mês.")
@@ -254,7 +288,9 @@ else:
 
 st.divider()
 
-# ---------- Pacientes (resumo) ----------
+# -------------------------------------------------
+# Pacientes (resumo)
+# -------------------------------------------------
 st.subheader("👨‍👩‍👧 Pacientes (resumo)")
 if not df_pac.empty:
     cols_pac = ["PacienteID","Nome","Responsavel","Telefone","Status","Prioridade"]
