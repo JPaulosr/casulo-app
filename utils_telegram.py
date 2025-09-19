@@ -1,85 +1,124 @@
-# === NOTIFICAÇÃO TELEGRAM (usa exclusivamente utils_telegram) ===
-from utils_telegram import tg_ready, default_chat_id, tg_send_text
+# utils_telegram.py
+import os
 import requests
+import streamlit as st
 
-LOGO_FALLBACK_URL = ""  # opcional; deixe vazio e use st.secrets["TELEGRAM_LOGO_FALLBACK"] se preferir
+# --- Fallback via variáveis de ambiente ---
+TELEGRAM_TOKEN_FALLBACK = (
+    os.getenv("TELEGRAM_TOKEN", "") or os.getenv("TELEGRAM_BOT_TOKEN", "")
+).strip()
 
-def _photo_or_logo(p: dict) -> str:
-    foto = str(p.get("FotoURL","") or "").strip()
-    if foto:
-        return foto
-    # tenta secrets; se não houver, usa constante
-    logo = ""
+TELEGRAM_CHATID_FALLBACK = (
+    os.getenv("TELEGRAM_CHAT_ID", "")
+    or os.getenv("TELEGRAM_CHAT_ID_CASULO", "")
+    or os.getenv("TELEGRAM_CHAT_ID_PADRAO", "")
+).strip()
+
+_TELEGRAM_KEY_CANDIDATES = ("TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN")
+_CHATID_KEY_CANDIDATES = ("TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID_CASULO", "TELEGRAM_CHAT_ID_PADRAO")
+
+def _tg_token() -> str:
+    # 1) override via UI
+    ov = (st.session_state.get("TELEGRAM_TOKEN_OVERRIDE", "") or "").strip()
+    if ov:
+        return ov
+    # 2) secrets
     try:
-        logo = (st.secrets.get("TELEGRAM_LOGO_FALLBACK","") or "").strip()
+        for k in _TELEGRAM_KEY_CANDIDATES:
+            v = (st.secrets.get(k, "") or "").strip()
+            if v:
+                return v
     except Exception:
         pass
-    return logo or LOGO_FALLBACK_URL or ""
+    # 3) env
+    return TELEGRAM_TOKEN_FALLBACK
 
-def _fmt_html(s: str) -> str:
-    return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
-
-def _send_tg_photo_or_text(caption_html: str, photo_url: str | None):
-    """
-    Envia foto+caption se houver photo_url; senão envia texto.
-    Usa exclusivamente utils_telegram (que já lê TELEGRAM_TOKEN e chat_id padrão).
-    """
-    if not tg_ready():
-        st.warning("⚠️ Telegram não configurado: defina TELEGRAM_TOKEN em secrets.")
-        return
-    chat_id = default_chat_id()
+def _tg_chat_id() -> str:
+    ov = (st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE", "") or "").strip()
+    if ov:
+        return ov
     try:
-        if photo_url:
-            # usa o mesmo token do utils_telegram, mas sem reimplementar auth:
-            # como o util não expõe o token, fazemos fallback: se sendPhoto falhar, caímos no texto.
-            # Monta URL com o token presente em st.secrets (igual ao utils_telegram)
-            tok = (st.secrets.get("TELEGRAM_TOKEN") or "").strip()
-            if not tok:
-                ok, err = tg_send_text(caption_html, chat_id)
-                if not ok:
-                    st.warning(f"⚠️ Telegram (texto) falhou: {err}")
-                else:
-                    st.toast("Notificação enviada ao Telegram ✅", icon="✅")
-                return
-            url = f"https://api.telegram.org/bot{tok}/sendPhoto"
-            data = {"chat_id": chat_id, "caption": caption_html, "parse_mode": "HTML", "disable_web_page_preview": True, "photo": photo_url}
-            r = requests.post(url, data=data, timeout=30)
-            if r.ok and r.json().get("ok"):
-                st.toast("Notificação enviada ao Telegram ✅", icon="✅")
-            else:
-                # fallback: manda como texto
-                ok, err = tg_send_text(caption_html, chat_id)
-                if not ok:
-                    st.warning(f"⚠️ Telegram (texto) falhou: {err}")
-        else:
-            ok, err = tg_send_text(caption_html, chat_id)
-            if not ok:
-                st.warning(f"⚠️ Telegram (texto) falhou: {err}")
-            else:
-                st.toast("Notificação enviada ao Telegram ✅", icon="✅")
+        for k in _CHATID_KEY_CANDIDATES:
+            v = (st.secrets.get(k, "") or "").strip()
+            if v:
+                return v
+    except Exception:
+        pass
+    return TELEGRAM_CHATID_FALLBACK
+
+def tg_ready() -> tuple[bool, bool, dict]:
+    tok = _tg_token()
+    cid = _tg_chat_id()
+    info = {
+        "prefer_keys_token": list(_TELEGRAM_KEY_CANDIDATES),
+        "prefer_keys_chat": list(_CHATID_KEY_CANDIDATES),
+        "token_source": "override" if st.session_state.get("TELEGRAM_TOKEN_OVERRIDE") else ("secrets/env" if tok else "MISSING"),
+        "chat_source": "override" if st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE") else ("secrets/env" if cid else "MISSING"),
+        "token_masked": (tok[:6] + "…" + tok[-4:]) if tok else "",
+        "chat_id": cid,
+    }
+    return bool(tok), bool(cid), info
+
+def tg_send_pdf(file_bytes: bytes, filename: str, caption: str = "") -> tuple[bool, str]:
+    token_ok, chat_ok, dbg = tg_ready()
+    if not (token_ok and chat_ok):
+        return (
+            False,
+            f"Telegram indisponível. Token OK? {token_ok} | ChatID OK? {chat_ok} | "
+            f"Procuradas: token {dbg['prefer_keys_token']} chat {dbg['prefer_keys_chat']}"
+        )
+    try:
+        url = f"https://api.telegram.org/bot{_tg_token()}/sendDocument"
+        files = {"document": (filename, file_bytes, "application/pdf")}
+        data = {"chat_id": _tg_chat_id(), "caption": (caption or "")[:1024]}
+        r = requests.post(url, data=data, files=files, timeout=60)
+        ok = r.ok and r.json().get("ok")
+        return (bool(ok), "" if ok else f"HTTP {r.status_code}: {r.text}")
     except Exception as e:
-        st.warning(f"⚠️ Falha ao enviar para o Telegram: {e}")
+        return False, f"Erro de rede: {e}"
 
-def _caption_paciente(action: str, p: dict, diffs: list[tuple[str,str,str]] | None = None) -> str:
-    # action: "Novo" ou "Editado"
-    nome = p.get("Nome") or "(sem nome)"
-    pid  = p.get("PacienteID") or "-"
-    status = p.get("Status") or "-"
-    prio   = p.get("Prioridade") or "-"
-    linhas = []
-    if action.lower() == "editado":
-        if diffs:
-            linhas.append("<b>Atualizações</b>:")
-            for campo, antes, depois in diffs:
-                linhas.append(f"• <b>{_fmt_html(campo)}:</b> {_fmt_html(antes)} → <code>{_fmt_html(depois)}</code>")
-        else:
-            linhas.append("• Sem diferenças detectadas.")
-    else:
-        linhas.append("• Cadastro realizado com sucesso.")
+def tg_test_message(text: str = "Teste ✅") -> tuple[bool, str]:
+    token_ok, chat_ok, dbg = tg_ready()
+    if not (token_ok and chat_ok):
+        return False, "Token/Chat ID ausente."
+    try:
+        url = f"https://api.telegram.org/bot{_tg_token()}/sendMessage"
+        payload = {"chat_id": _tg_chat_id(), "text": text, "parse_mode": "HTML"}
+        r = requests.post(url, json=payload, timeout=30)
+        ok = r.ok and r.json().get("ok")
+        return (bool(ok), "" if ok else f"HTTP {r.status_code}: {r.text}")
+    except Exception as e:
+        return False, str(e)
 
-    return (
-        f"<b>Paciente {action}</b>\n"
-        f"<b>{_fmt_html(nome)}</b>  <i>({pid})</i>\n"
-        f"Status: <b>{_fmt_html(status)}</b> • Prioridade: <b>{_fmt_html(prio)}</b>\n\n"
-        + "\n".join(linhas)
-    )
+def tg_debug_expander():
+    """Renderiza um expander com diagnóstico + override."""
+    with st.expander("🔧 Diagnóstico Telegram"):
+        token_ok, chat_ok, dbg = tg_ready()
+        st.write(f"Token OK? **{token_ok}** | ChatID OK? **{chat_ok}**")
+        st.caption(f"Fonte token: {dbg['token_source']} | Fonte chat: {dbg['chat_source']}")
+        if token_ok:
+            st.caption(f"Token (mascarado): {dbg['token_masked']}")
+        if chat_ok:
+            st.caption(f"Chat ID: {dbg['chat_id']}")
+        try:
+            st.caption("Chaves disponíveis em st.secrets (somente nomes):")
+            st.code(", ".join(sorted(list(st.secrets.keys()))))
+        except Exception as e:
+            st.caption(f"Não foi possível listar st.secrets ({e})")
+
+        st.divider()
+        st.caption("👉 Override temporário (usa sessão atual):")
+        tok_in = st.text_input("Token do Bot (override temporário)", type="password",
+                               value=st.session_state.get("TELEGRAM_TOKEN_OVERRIDE", ""))
+        cid_in = st.text_input("Chat ID (override temporário)",
+                               value=st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE", ""))
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button("Aplicar overrides"):
+                st.session_state["TELEGRAM_TOKEN_OVERRIDE"] = (tok_in or "").strip()
+                st.session_state["TELEGRAM_CHAT_ID_OVERRIDE"] = (cid_in or "").strip()
+                st.success("Overrides aplicados. Agora teste o envio.")
+        with col_b:
+            if st.button("Testar envio de mensagem"):
+                ok, err = tg_test_message("Teste ✅ (debug)")
+                st.success("Mensagem enviada! ✅") if ok else st.error(f"Falhou: {err}")
