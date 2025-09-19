@@ -249,12 +249,3 @@ if not df_pac.empty:
     st.dataframe(df_pac[cols_pac], use_container_width=True, hide_index=True)
 else:
     st.info("Nenhum paciente cadastrado ainda.")
-
-with st.expander("🔧 Diagnóstico técnico"):
-    try:
-        st.write("Abas:", [w.title for w in ss.worksheets()])
-    except Exception as e:
-        st.warning(f"Não consegui listar as abas: {e}")
-    if st.button("Atualizar dados (limpar cache)"):
-        st.cache_data.clear()
-        st.rerun()
