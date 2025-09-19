@@ -243,43 +243,59 @@ with tab_edit:
         st.info("Nenhuma sessão no período selecionado.")
     else:
         faixa = faixa.sort_values(["Data","HoraInicio","Nome"])
+
         def _label(r):
             return f"{r['Data']} • {r.get('HoraInicio','--')}–{r.get('HoraFim','--')} • {r.get('Nome','-')} • {r.get('Profissional','') or 'Prof.'} • {r.get('Status','') or ''}"
+
         options = { _label(r): (r["SessaoID"], int(r["__rownum"])) for _, r in faixa.iterrows() }
         escolha = st.selectbox("Escolha a sessão", list(options.keys()))
         sid_sel, rownum = options.get(escolha, (None, None))
 
         if sid_sel and rownum:
-            # pega linha real
+            # linha original
             linha = df_ses[df_ses["SessaoID"] == sid_sel].head(1).iloc[0]
 
             st.markdown(f"**Sessão:** `{sid_sel}`  •  Linha: {rownum}")
+
+            # ------- FORM DE EDIÇÃO -------
             with st.form("edit_form"):
                 data_e = st.date_input("Data", value=parse_br_date(linha["Data"]) or date.today())
                 hi_e = st.text_input("Hora início (HH:MM)", str(linha.get("HoraInicio","") or ""))
                 hf_e = st.text_input("Hora fim (HH:MM)", str(linha.get("HoraFim","") or ""))
                 prof_e = st.text_input("Profissional", str(linha.get("Profissional","") or "Terapeuta"))
-                status_e = st.selectbox("Status", ["Agendada","Realizada","Falta","Cancelada"],
-                                        index=["Agendada","Realizada","Falta","Cancelada"].index(str(linha.get("Status","Agendada")) or "Agendada"))
-                tipo_e = st.selectbox("Tipo", ["Terapia","Avaliação","Retorno"],
-                                      index=max(0, ["Terapia","Avaliação","Retorno"].index(str(linha.get("Tipo","Terapia")) if str(linha.get("Tipo","Terapia")) in ["Terapia","Avaliação","Retorno"] else "Terapia")))
+
+                status_opts = ["Agendada","Realizada","Falta","Cancelada"]
+                try:
+                    st_idx = status_opts.index(str(linha.get("Status","Agendada")))
+                except ValueError:
+                    st_idx = 0
+                status_e = st.selectbox("Status", status_opts, index=st_idx)
+
+                tipo_opts = ["Terapia","Avaliação","Retorno"]
+                try:
+                    tp_idx = tipo_opts.index(str(linha.get("Tipo","Terapia")))
+                except ValueError:
+                    tp_idx = 0
+                tipo_e = st.selectbox("Tipo", tipo_opts, index=tp_idx)
+
                 objetivos_e = st.text_input("Objetivos trabalhados", str(linha.get("ObjetivosTrabalhados","") or ""))
                 obs_e = st.text_area("Observações", str(linha.get("Observacoes","") or ""))
                 anexos_e = st.text_input("AnexosURL", str(linha.get("AnexosURL","") or ""))
+
                 c_upd, c_del = st.columns(2)
                 salvar = c_upd.form_submit_button("💾 Salvar alterações", use_container_width=True)
-                apagar = c_del.form_submit_button("🗑️ Apagar sessão", use_container_width=True)
+                pedir_apagar = c_del.form_submit_button("🗑️ Apagar sessão", use_container_width=True)
 
             if salvar:
-                # validações
                 hi_v = parse_hhmm(hi_e)
                 hf_v = parse_hhmm(hf_e) if hf_e.strip() else None
                 if not hi_v:
-                    st.error("Hora início inválida."); st.stop()
+                    st.error("Hora início inválida.")
+                    st.stop()
                 if hf_v and to_min(hf_v) <= to_min(hi_v):
-                    st.error("**Hora fim** deve ser maior que **Hora início**."); st.stop()
+                    st.error("**Hora fim** deve ser maior que **Hora início**.")
+                    st.stop()
 
-                # aplica updates nas colunas relevantes
                 updates = [
                     ("Data", br_date(data_e)),
                     ("HoraInicio", hi_e.strip()),
@@ -297,11 +313,35 @@ with tab_edit:
                         ws.update_cell(rownum, ci, val)
 
                 st.success("Sessão atualizada com sucesso.")
-                st.cache_data.clear(); st.rerun()
+                st.cache_data.clear()
+                st.rerun()
 
-            if apagar:
-                st.warning("Esta ação removerá a linha da planilha. Confirme abaixo.")
-                if st.checkbox("Confirmo que desejo apagar esta sessão definitivamente."):
-                    ws.delete_rows(rownum)
-                    st.success("Sessão apagada.")
-                    st.cache_data.clear(); st.rerun()
+            # ------- ETAPA 1: marcar exclusão pendente -------
+            if pedir_apagar:
+                st.session_state["__pending_delete"] = {
+                    "sid": sid_sel,
+                    "rownum": int(rownum),
+                    "desc": escolha,
+                }
+                st.rerun()
+
+# ------- ETAPA 2: confirmar fora do form (não reseta) -------
+pend = st.session_state.get("__pending_delete")
+if pend:
+    st.error("⚠️ Confirma remover permanentemente a sessão abaixo?")
+    st.write(pend["desc"])
+    col_c, col_x = st.columns(2)
+    if col_c.button("✅ Confirmar exclusão", key="confirm_delete_btn", use_container_width=True):
+        try:
+            ws.delete_rows(int(pend["rownum"]))
+            st.success("Sessão apagada.")
+        except Exception as e:
+            st.error(f"Erro ao apagar: {e}")
+        finally:
+            st.session_state.pop("__pending_delete", None)
+            st.cache_data.clear()
+            st.rerun()
+    if col_x.button("❌ Cancelar", key="cancel_delete_btn", use_container_width=True):
+        st.session_state.pop("__pending_delete", None)
+        st.info("Exclusão cancelada.")
+        st.rerun()
