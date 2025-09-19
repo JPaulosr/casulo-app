@@ -1,4 +1,6 @@
 # utils_telegram.py
+# Centraliza lógica do Telegram: leitura de secrets/env/override, teste e envio.
+
 import os
 import requests
 import streamlit as st
@@ -17,8 +19,9 @@ TELEGRAM_CHATID_FALLBACK = (
 _TELEGRAM_KEY_CANDIDATES = ("TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN")
 _CHATID_KEY_CANDIDATES = ("TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID_CASULO", "TELEGRAM_CHAT_ID_PADRAO")
 
+
 def _tg_token() -> str:
-    # 1) override via UI
+    # 1) override via UI (session_state)
     ov = (st.session_state.get("TELEGRAM_TOKEN_OVERRIDE", "") or "").strip()
     if ov:
         return ov
@@ -33,10 +36,13 @@ def _tg_token() -> str:
     # 3) env
     return TELEGRAM_TOKEN_FALLBACK
 
+
 def _tg_chat_id() -> str:
+    # 1) override via UI (session_state)
     ov = (st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE", "") or "").strip()
     if ov:
         return ov
+    # 2) secrets
     try:
         for k in _CHATID_KEY_CANDIDATES:
             v = (st.secrets.get(k, "") or "").strip()
@@ -44,9 +50,12 @@ def _tg_chat_id() -> str:
                 return v
     except Exception:
         pass
+    # 3) env
     return TELEGRAM_CHATID_FALLBACK
 
+
 def tg_ready() -> tuple[bool, bool, dict]:
+    """retorna (token_ok, chat_ok, info_debug)"""
     tok = _tg_token()
     cid = _tg_chat_id()
     info = {
@@ -58,6 +67,7 @@ def tg_ready() -> tuple[bool, bool, dict]:
         "chat_id": cid,
     }
     return bool(tok), bool(cid), info
+
 
 def tg_send_pdf(file_bytes: bytes, filename: str, caption: str = "") -> tuple[bool, str]:
     token_ok, chat_ok, dbg = tg_ready()
@@ -77,8 +87,9 @@ def tg_send_pdf(file_bytes: bytes, filename: str, caption: str = "") -> tuple[bo
     except Exception as e:
         return False, f"Erro de rede: {e}"
 
+
 def tg_test_message(text: str = "Teste ✅") -> tuple[bool, str]:
-    token_ok, chat_ok, dbg = tg_ready()
+    token_ok, chat_ok, _ = tg_ready()
     if not (token_ok and chat_ok):
         return False, "Token/Chat ID ausente."
     try:
@@ -90,8 +101,9 @@ def tg_test_message(text: str = "Teste ✅") -> tuple[bool, str]:
     except Exception as e:
         return False, str(e)
 
+
 def tg_debug_expander():
-    """Renderiza um expander com diagnóstico + override."""
+    """Expander pronto com diagnóstico + override + teste de envio."""
     with st.expander("🔧 Diagnóstico Telegram"):
         token_ok, chat_ok, dbg = tg_ready()
         st.write(f"Token OK? **{token_ok}** | ChatID OK? **{chat_ok}**")
@@ -100,6 +112,7 @@ def tg_debug_expander():
             st.caption(f"Token (mascarado): {dbg['token_masked']}")
         if chat_ok:
             st.caption(f"Chat ID: {dbg['chat_id']}")
+
         try:
             st.caption("Chaves disponíveis em st.secrets (somente nomes):")
             st.code(", ".join(sorted(list(st.secrets.keys()))))
@@ -107,7 +120,7 @@ def tg_debug_expander():
             st.caption(f"Não foi possível listar st.secrets ({e})")
 
         st.divider()
-        st.caption("👉 Override temporário (usa sessão atual):")
+        st.caption("👉 Override temporário (usa sessão atual do navegador):")
         tok_in = st.text_input("Token do Bot (override temporário)", type="password",
                                value=st.session_state.get("TELEGRAM_TOKEN_OVERRIDE", ""))
         cid_in = st.text_input("Chat ID (override temporário)",
