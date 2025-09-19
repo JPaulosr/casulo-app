@@ -21,7 +21,7 @@ st.title("📄 Detalhe do Paciente")
 CLINIC_NAME = "Espaço Terapêutico Casulo"
 
 # =========================
-# Telegram (robusto: múltiplas chaves + env + diagnóstico)
+# Telegram (robusto: múltiplas chaves + env + override via UI + diagnóstico)
 # =========================
 TELEGRAM_TOKEN_FALLBACK = (
     os.getenv("TELEGRAM_TOKEN", "")
@@ -45,7 +45,11 @@ _CHATID_KEY_CANDIDATES = (
 )
 
 def _tg_token() -> str:
-    # tenta várias chaves em st.secrets
+    # 1) override via UI (session_state)
+    ov = (st.session_state.get("TELEGRAM_TOKEN_OVERRIDE", "") or "").strip()
+    if ov:
+        return ov
+    # 2) secrets
     try:
         for k in _TELEGRAM_KEY_CANDIDATES:
             v = (st.secrets.get(k, "") or "").strip()
@@ -53,9 +57,15 @@ def _tg_token() -> str:
                 return v
     except Exception:
         pass
+    # 3) env fallback
     return TELEGRAM_TOKEN_FALLBACK
 
 def _tg_chat_id() -> str:
+    # 1) override via UI (session_state)
+    ov = (st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE", "") or "").strip()
+    if ov:
+        return ov
+    # 2) secrets
     try:
         for k in _CHATID_KEY_CANDIDATES:
             v = (st.secrets.get(k, "") or "").strip()
@@ -63,17 +73,20 @@ def _tg_chat_id() -> str:
                 return v
     except Exception:
         pass
+    # 3) env fallback
     return TELEGRAM_CHATID_FALLBACK
 
 def tg_ready() -> tuple[bool, bool, dict]:
-    """retorna (token_ok, chat_ok, info_debug) com chaves realmente lidas"""
     tok = _tg_token()
     cid = _tg_chat_id()
+    # tenta descobrir de onde veio (apenas para debug)
+    source_tok = "override" if st.session_state.get("TELEGRAM_TOKEN_OVERRIDE") else ("secrets/env" if tok else "MISSING")
+    source_cid = "override" if st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE") else ("secrets/env" if cid else "MISSING")
     info = {
         "prefer_keys_token": list(_TELEGRAM_KEY_CANDIDATES),
         "prefer_keys_chat":  list(_CHATID_KEY_CANDIDATES),
-        "token_source": "secrets/env" if tok else "MISSING",
-        "chat_source":  "secrets/env" if cid else "MISSING",
+        "token_source": source_tok,
+        "chat_source":  source_cid,
         "token_masked": (tok[:6] + "…" + tok[-4:]) if tok else "",
         "chat_id": cid,
     }
