@@ -402,27 +402,42 @@ with tab_rel:
     with colbtn5:
         prev_ok = st.button("👁️ Pré-visualizar no app", use_container_width=True)
 
-    # ---------- Diagnóstico Telegram ----------
-    with st.expander("🔧 Diagnóstico Telegram"):
-        token_ok, chat_ok, dbg = tg_ready()
-        st.write(f"Token OK? **{token_ok}** | ChatID OK? **{chat_ok}**")
-        if token_ok:
-            st.caption(f"Token (mascarado): {dbg['token_masked']}")
-        if chat_ok:
-            st.caption(f"Chat ID: {dbg['chat_id']}")
-        st.caption(f"Chaves buscadas (token): {dbg['prefer_keys_token']}")
-        st.caption(f"Chaves buscadas (chat):  {dbg['prefer_keys_chat']}")
-        if st.button("Testar envio de mensagem"):
-            try:
-                url = f"https://api.telegram.org/bot{_tg_token()}/sendMessage"
-                payload = {"chat_id": _tg_chat_id(), "text": "Teste ✅ Página Paciente_Detalhe.", "parse_mode": "HTML"}
-                r = requests.post(url, json=payload, timeout=30)
-                if r.ok and r.json().get("ok"):
-                    st.success("Mensagem enviada com sucesso ✅")
-                else:
-                    st.error(f"Falhou: HTTP {r.status_code}: {r.text}")
-            except Exception as e:
-                st.error(f"Erro: {e}")
+   with st.expander("🔧 Diagnóstico Telegram"):
+    token_ok, chat_ok, dbg = tg_ready()
+    st.write(f"Token OK? **{token_ok}** | ChatID OK? **{chat_ok}**")
+    st.caption(f"Fonte token: {dbg['token_source']} | Fonte chat: {dbg['chat_source']}")
+    if token_ok:
+        st.caption(f"Token (mascarado): {dbg['token_masked']}")
+    if chat_ok:
+        st.caption(f"Chat ID: {dbg['chat_id']}")
+
+    # Mostra quais chaves de secrets estão disponíveis (NÃO mostra valores)
+    try:
+        st.caption("Chaves disponíveis em st.secrets (somente nomes):")
+        st.code(", ".join(sorted(list(st.secrets.keys()))))
+    except Exception as e:
+        st.caption(f"Não foi possível listar st.secrets ({e})")
+
+    st.divider()
+    st.caption("👉 Override temporário (útil se o deploy ainda não carregou os secrets):")
+    tok_in = st.text_input("Token do Bot (override temporário)", type="password", value=st.session_state.get("TELEGRAM_TOKEN_OVERRIDE", ""))
+    cid_in = st.text_input("Chat ID (override temporário)", value=st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE", ""))
+    if st.button("Aplicar overrides acima"):
+        st.session_state["TELEGRAM_TOKEN_OVERRIDE"] = tok_in.strip()
+        st.session_state["TELEGRAM_CHAT_ID_OVERRIDE"] = cid_in.strip()
+        st.success("Overrides aplicados. Clique em 'Testar' abaixo ou tente enviar o PDF.")
+
+    if st.button("Testar envio de mensagem"):
+        try:
+            url = f"https://api.telegram.org/bot{_tg_token()}/sendMessage"
+            payload = {"chat_id": _tg_chat_id(), "text": "Teste ✅ Página Paciente/Pacientes.", "parse_mode": "HTML"}
+            r = requests.post(url, json=payload, timeout=30)
+            if r.ok and r.json().get("ok"):
+                st.success("Mensagem enviada com sucesso ✅")
+            else:
+                st.error(f"Falhou: HTTP {r.status_code}: {r.text}")
+        except Exception as e:
+            st.error(f"Erro: {e}")
 
     rows_sel = rel_vis[rel_vis["RelatorioID"].astype(str).isin(sel)].copy()
 
