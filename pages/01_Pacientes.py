@@ -19,20 +19,20 @@ PAC_COLS = [
     "Diagnostico","Convenio","Status","Prioridade","FotoURL","Observacoes"
 ]
 df, ws = read_ws(ss, "Pacientes", PAC_COLS)
-df = df.fillna("")
+df = (df if isinstance(df, pd.DataFrame) else pd.DataFrame(columns=PAC_COLS)).copy()
+df = df.reindex(columns=PAC_COLS).fillna("")
 
 # Normalizações leves
 def _to_date_str(s):
     if not s: return ""
     s = str(s).strip()
-    # aceita 2025-09-18, 18/09/2025, etc.
     for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
         try:
             d = datetime.strptime(s, fmt)
             return d.strftime("%d/%m/%Y")
         except Exception:
             pass
-    return s  # mantém se não reconheceu
+    return s
 
 df["DataNascimento"] = df["DataNascimento"].map(_to_date_str)
 
@@ -52,26 +52,19 @@ with st.sidebar:
 # KPI topo
 # =========================
 c1, c2, c3, c4 = st.columns(4)
-with c1:
-    st.metric("Total", len(df))
-with c2:
-    st.metric("Ativos", int((df["Status"]=="Ativo").sum()))
-with c3:
-    st.metric("Pausa", int((df["Status"]=="Pausa").sum()))
-with c4:
-    st.metric("Altas", int((df["Status"]=="Alta").sum()))
+with c1: st.metric("Total", len(df))
+with c2: st.metric("Ativos", int((df["Status"]=="Ativo").sum()))
+with c3: st.metric("Pausa", int((df["Status"]=="Pausa").sum()))
+with c4: st.metric("Altas", int((df["Status"]=="Alta").sum()))
 
 # =========================
 # Aplicar filtros
 # =========================
 df_view = df.copy()
-
 if sel_status != "(Todos)":
     df_view = df_view[df_view["Status"]==sel_status]
-
 if sel_prio != "(Todas)":
     df_view = df_view[df_view["Prioridade"]==sel_prio]
-
 if q.strip():
     ql = q.strip().lower()
     mask = (
@@ -96,19 +89,16 @@ with ac1:
         use_container_width=True
     )
 with ac2:
-    st.write("")  # espaçamento
-    st.caption("Gerar link WhatsApp para contato rápido")
+    st.caption("Link WhatsApp rápido")
     tel_raw = st.text_input("Telefone (somente números, c/ DDD)", "", key="wa_tel")
     if st.button("Abrir WhatsApp", use_container_width=True):
         t = re.sub(r"\D+", "", tel_raw or "")
         if t:
-            st.link_button("Clique aqui para abrir o WhatsApp", f"https://wa.me/55{t}")
+            st.markdown(f'[Clique para abrir o WhatsApp](https://wa.me/55{t})')
         else:
             st.warning("Informe um telefone válido (apenas números).")
-
 with ac3:
-    st.write("")
-    st.caption("Dica: você pode editar a tabela abaixo e salvar em lote.")
+    st.caption("Dica: edite a tabela abaixo e salve em lote.")
 
 st.markdown("---")
 
@@ -116,13 +106,27 @@ st.markdown("---")
 # Lista (editável)
 # =========================
 st.subheader("Lista (editar direto na tabela)")
-# Ordem de colunas para visualização
+
 cols_show = [
     "PacienteID","Nome","Responsavel","Telefone","Email","DataNascimento",
     "Diagnostico","Convenio","Status","Prioridade","FotoURL","Observacoes"
 ]
 
-# Editor: desabilita ID
+# --- Normalização forte de tipos (evita erro do data_editor) ---
+df_view = df_view.copy().reindex(columns=PAC_COLS).fillna("")
+TEXT_COLS = PAC_COLS[:]  # todas são texto aqui
+for c in TEXT_COLS:
+    df_view[c] = df_view[c].astype(str)
+
+# --- Opções dinâmicas — incluem existentes + padrão + vazio ---
+status_defaults = ["Ativo", "Pausa", "Alta"]
+prio_defaults   = ["Normal", "Alta", "Urgente"]
+status_opts = sorted(set(df_view["Status"].unique()) | set(status_defaults) | {""})
+prio_opts   = sorted(set(df_view["Prioridade"].unique()) | set(prio_defaults) | {""})
+
+df_view.loc[~df_view["Status"].isin(status_opts), "Status"] = ""
+df_view.loc[~df_view["Prioridade"].isin(prio_opts), "Prioridade"] = ""
+
 edited_df = st.data_editor(
     df_view[cols_show].reset_index(drop=True),
     hide_index=True,
@@ -137,36 +141,29 @@ edited_df = st.data_editor(
         "DataNascimento": st.column_config.TextColumn("Nascimento (DD/MM/AAAA)"),
         "Diagnostico": st.column_config.TextColumn("Diagnóstico(s)", width="large"),
         "Convenio": st.column_config.TextColumn("Convênio"),
-        "Status": st.column_config.SelectboxColumn("Status", options=["Ativo","Pausa","Alta"]),
-        "Prioridade": st.column_config.SelectboxColumn("Prioridade", options=["Normal","Alta","Urgente"]),
-        "FotoURL": st.column_config.LinkColumn("FotoURL", help="URL de imagem (Drive/Cloudinary)"),
+        "Status": st.column_config.SelectboxColumn("Status", options=status_opts),
+        "Prioridade": st.column_config.SelectboxColumn("Prioridade", options=prio_opts),
+        # TextColumn é mais permissivo; troque para LinkColumn quando estiver tudo limpo
+        "FotoURL": st.column_config.TextColumn("FotoURL", help="URL de imagem (Drive/Cloudinary)"),
         "Observacoes": st.column_config.TextColumn("Observações", width="large"),
     },
     key="grid_pacientes",
 )
 
-# Mapear de volta para o df original por PacienteID
-# Vamos criar uma cópia do df (global), aplicar as mudanças e permitir salvar.
+# Reconstruir df mesclado (aplica alterações do editor ao df original por PacienteID)
 df_to_save = df.copy()
-# Índice por PacienteID para merge
 orig_by_id = df_to_save.set_index("PacienteID")
 edit_by_id = edited_df.set_index("PacienteID")
-
-# Substitui linhas que apareceram no editor (mantém as demais inalteradas)
 common_ids = edit_by_id.index.intersection(orig_by_id.index)
 orig_by_id.loc[common_ids, cols_show[1:]] = edit_by_id.loc[common_ids, cols_show[1:]]
-
 df_merged = orig_by_id.reset_index()
 
 save_col1, save_col2 = st.columns([1,1])
 
 with save_col1:
     if st.button("💾 Salvar alterações", type="primary", use_container_width=True):
-        # escreve tudo de volta (seguro e simples) preservando schema
         try:
-            # garante todas as colunas e ordem
             out = df_merged[PAC_COLS].fillna("")
-            # escreve cabeçalho + linhas
             values = [PAC_COLS] + out.values.tolist()
             ws.update("A1", values)
             st.success("Alterações salvas na planilha ✅")
@@ -176,16 +173,13 @@ with save_col1:
             st.error(f"Erro ao salvar: {e}")
 
 with save_col2:
-    st.write("")  # espaçamento
-    # Seleção por PacienteID para excluir
     ids_para_excluir = st.multiselect(
         "Selecionar pacientes para apagar",
-        options=df_view["PacienteID"].tolist(),
+        options=sorted(df_view["PacienteID"].unique().tolist()),
         help="Escolha um ou mais PacienteID para exclusão."
     )
     if st.button("🗑️ Excluir selecionados", use_container_width=True, disabled=(len(ids_para_excluir)==0)):
         try:
-            # Remove do df global e escreve de volta
             df_drop = df_to_save[~df_to_save["PacienteID"].isin(ids_para_excluir)]
             out = df_drop[PAC_COLS].fillna("")
             values = [PAC_COLS] + out.values.tolist()
@@ -206,7 +200,10 @@ for _, row in edited_df.iterrows():
         cimg, cinfo = st.columns([1,3])
         with cimg:
             if str(row.get("FotoURL","")).strip():
-                st.image(str(row["FotoURL"]), caption=row["Nome"], use_container_width=True)
+                try:
+                    st.image(str(row["FotoURL"]), caption=row["Nome"], use_container_width=True)
+                except Exception:
+                    st.caption("Não foi possível carregar a imagem.")
             else:
                 st.caption("Sem foto.")
         with cinfo:
@@ -256,7 +253,7 @@ with st.form("novo_paciente"):
                     "Telefone": tel.strip(),
                     "Email": email.strip(),
                     "Diagnostico": diag.strip(),
-                    "Convenio": conv.strip() or "Particular",
+                    "Convenio": (conv.strip() or "Particular"),
                     "Status": status,
                     "Prioridade": prio,
                     "FotoURL": foto.strip(),
