@@ -1,23 +1,25 @@
-# pages/01_Pacientes.py
+# pages/02_Paciente_Detalhe.py
 # -*- coding: utf-8 -*-
-import re
+import base64
+import requests
 from datetime import datetime
 import pandas as pd
 import streamlit as st
 import gspread
 from gspread.exceptions import APIError
 
-from utils_casulo import connect, read_ws, append_rows, new_id
+from utils_casulo import connect, read_ws
+from utils_telegram import _token as tg_token, default_chat_id as tg_default_chat_id, tg_send_text
 
-st.set_page_config(page_title="Casulo — Pacientes", page_icon="👨‍👩‍👧", layout="wide")
+st.set_page_config(page_title="Casulo — Paciente", page_icon="📄", layout="wide")
+st.title("📄 Detalhe do Paciente")
 
-# =========================
-# Constantes / schema
-# =========================
 PAC_COLS = [
     "PacienteID","Nome","DataNascimento","Responsavel","Telefone","Email",
     "Diagnostico","Convenio","Status","Prioridade","FotoURL","Observacoes"
 ]
+
+LOGO_FALLBACK_URL = ""  # opcional; ou defina secrets["TELEGRAM_LOGO_FALLBACK"]
 
 def _to_date_str(s):
     if not s: return ""
@@ -30,392 +32,184 @@ def _to_date_str(s):
             pass
     return s
 
-# =========================
-# UI sugar: CSS moderno (igual ao 02_Paciente_Detalhe)
-# =========================
-st.markdown("""
-<style>
-:root {
-  --card-bg: rgba(255,255,255,0.05);
-  --card-bd: rgba(255,255,255,0.12);
-  --muted: rgba(255,255,255,0.6);
-}
-html, body, [data-testid="stAppViewContainer"] { scroll-behavior: smooth; }
-.block-container { padding-top: 1.1rem; }
-h1,h2,h3 { letter-spacing:.2px; }
-.header-card {
-  border: 1px solid var(--card-bd);
-  background: linear-gradient(180deg, var(--card-bg), transparent);
-  padding: 16px; border-radius: 16px; margin: .2rem 0 1rem 0;
-}
-.kpi-card {
-  border: 1px solid var(--card-bd);
-  background: var(--card-bg);
-  padding: 14px 16px; border-radius: 14px;
-}
-.kpi-title { font-size: .78rem; color: var(--muted); margin-bottom: 6px; }
-.kpi-value { font-size: 1.25rem; font-weight: 700; }
-.badge {
-  display:inline-block; padding: 2px 8px; border-radius: 999px;
-  font-size:.75rem; font-weight:600; border:1px solid var(--card-bd);
-  background: rgba(255,255,255,.06); margin-right:6px; margin-bottom:4px;
-}
-.badge.ok   { background: rgba(46,160,67,.18);  border-color: rgba(46,160,67,.35); }
-.badge.warn { background: rgba(255,171,0,.18); border-color: rgba(255,171,0,.35); }
-.badge.err  { background: rgba(244,67,54,.18); border-color: rgba(244,67,54,.35); }
-.action-bar {
-  position: sticky; top: 0; z-index: 5;
-  padding: 10px 12px; border-radius: 12px;
-  background: linear-gradient(180deg, rgba(0,0,0,.18), rgba(0,0,0,.06));
-  border: 1px solid var(--card-bd); backdrop-filter: blur(8px);
-  margin-bottom: .6rem;
-}
-.doc-item {
-  padding: 8px 10px; border-radius: 12px;
-  border: 1px solid var(--card-bd); margin-bottom: 8px;
-  background: var(--card-bg);
-}
-.avatar {
-  width: 64px; height: 64px; border-radius: 12px;
-  object-fit: cover; border: 1px solid var(--card-bd);
-}
-.small-muted { color: var(--muted); font-size: .9rem; }
-.exp-chip { font-size:.8rem; color:var(--muted); }
-</style>
-""", unsafe_allow_html=True)
+def _fmt_html(s: str) -> str:
+    return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
-# =========================
-# Conexão + leitura robusta
-# =========================
-ss = connect()
-
-def _render_perm_help(err: Exception):
-    st.error("Falha de acesso à planilha (provável permissão/escopo).")
-    sa_email = None
+def _photo_or_logo(p: dict) -> str:
+    foto = str(p.get("FotoURL","") or "").strip()
+    if foto:
+        return foto
     try:
-        sa_email = st.secrets.get("gcp_service_account", {}).get("client_email", None)
+        logo_secret = (st.secrets.get("TELEGRAM_LOGO_FALLBACK","") or "").strip()
     except Exception:
-        pass
-    if not sa_email:
-        for key in ("service_account", "gspread_service_account", "gcp"):
-            try:
-                sa_email = st.secrets.get(key, {}).get("client_email", None) or sa_email
-            except Exception:
-                pass
-    if sa_email:
-        st.info(f"Compartilhe a planilha com o e-mail da Service Account: **{sa_email}** (permissão de Editor).")
-    else:
-        st.info("Compartilhe a planilha com o e-mail da sua Service Account (`...iam.gserviceaccount.com`).")
-    st.caption("Depois de compartilhar, atualize a página.")
+        logo_secret = ""
+    return foto or logo_secret or LOGO_FALLBACK_URL or ""
 
-def _safe_load_sheet(ss, title: str, cols: list[str]) -> tuple[pd.DataFrame, gspread.Worksheet]:
-    """Tenta read_ws; se falhar, cria a aba e cabeçalhos. Exibe diagnósticos úteis."""
+def _diff_changes(old_rec: dict, new_rec: dict, campos=None):
+    if campos is None:
+        campos = ["Nome","Responsavel","Telefone","Email","DataNascimento",
+                  "Diagnostico","Convenio","Status","Prioridade","FotoURL","Observacoes"]
+    diffs = []
+    for c in campos:
+        a = str(old_rec.get(c,"") or "").strip()
+        b = str(new_rec.get(c,"") or "").strip()
+        if a != b:
+            diffs.append((c, a, b))
+    return diffs
+
+def _tg_send_photo_card(caption_html: str, photo_url: str):
+    tok = tg_token()
+    if not tok:
+        st.warning("⚠️ TELEGRAM_TOKEN ausente em secrets.")
+        return
+    chat_id = tg_default_chat_id()
     try:
-        df, ws = read_ws(ss, title, cols)
-        df = (df if isinstance(df, pd.DataFrame) else pd.DataFrame(columns=cols))
-        df = df.reindex(columns=cols).fillna("")
-        return df, ws
-    except APIError as e:
-        st.warning("Não consegui ler a aba. Vou diagnosticar e tentar recuperar automaticamente…")
-        existing = []
-        try:
-            existing = [w.title for w in ss.worksheets()]
-        except Exception:
-            pass
-        if existing:
-            st.info(f"Aba(s) existentes na planilha: {', '.join(existing)}")
-        if title not in existing:
-            st.info(f"A aba **{title}** não existe. Vou criar agora com o cabeçalho padrão.")
-            try:
-                ws = ss.add_worksheet(title=title, rows=200, cols=max(20, len(cols)))
-                ws.update("A1", [cols])
-                st.success(f"Aba **{title}** criada com sucesso ✅")
-                return pd.DataFrame(columns=cols), ws
-            except APIError as e_create:
-                _render_perm_help(e_create)
-                raise
+        if photo_url:
+            url = f"https://api.telegram.org/bot{tok}/sendPhoto"
+            data = {"chat_id": chat_id, "caption": caption_html, "parse_mode": "HTML", "disable_web_page_preview": True}
+            data["photo"] = photo_url
+            r = requests.post(url, data=data, timeout=30)
         else:
-            _render_perm_help(e)
-            raise
+            ok, err = tg_send_text(caption_html, chat_id)
+            if not ok:
+                st.warning(f"⚠️ Telegram (texto) falhou: {err}")
+            return
+        if not r.ok:
+            st.warning(f"⚠️ Telegram respondeu {r.status_code}: {r.text[:200]}")
+        else:
+            st.toast("Notificação enviada ao Telegram ✅", icon="✅")
     except Exception as e:
-        st.error(f"Erro inesperado ao abrir a planilha: {e}")
-        raise
+        st.warning(f"⚠️ Falha ao enviar para o Telegram: {e}")
 
-df, ws = _safe_load_sheet(ss, "Pacientes", PAC_COLS)
-df["DataNascimento"] = df["DataNascimento"].map(_to_date_str)
-
-# =========================
-# Header
-# =========================
-st.markdown('<div class="header-card">', unsafe_allow_html=True)
-st.title("👨‍👩‍👧 Pacientes")
-st.caption("Gestão central de pacientes — editar, filtrar, exportar e cadastrar.")
-top_badges = [
-    '<span class="badge">Convênio / Particular</span>',
-    '<span class="badge ok">Ativo</span>',
-    '<span class="badge warn">Pausa</span>',
-    '<span class="badge err">Alta</span>',
-]
-st.markdown(" ".join(top_badges), unsafe_allow_html=True)
-st.markdown('</div>', unsafe_allow_html=True)
-
-# =========================
-# Sidebar — Filtros
-# =========================
-with st.sidebar:
-    st.header("🔎 Filtros")
-    q = st.text_input("Buscar (nome, responsável, tel, email, diagnóstico)", "")
-    status_opt = ["(Todos)","Ativo","Pausa","Alta"]
-    sel_status = st.selectbox("Status", status_opt, index=0)
-    prio_opt = ["(Todas)","Normal","Alta","Urgente"]
-    sel_prio = st.selectbox("Prioridade", prio_opt, index=0)
-    st.caption("Dica: use a busca para achar por telefone ou parte do nome.")
-
-# =========================
-# KPI topo (cards)
-# =========================
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    st.markdown(f'<div class="kpi-card"><div class="kpi-title">Total</div><div class="kpi-value">{len(df)}</div></div>', unsafe_allow_html=True)
-with c2:
-    st.markdown(f'<div class="kpi-card"><div class="kpi-title">Ativos</div><div class="kpi-value">{int((df["Status"]=="Ativo").sum())}</div></div>', unsafe_allow_html=True)
-with c3:
-    st.markdown(f'<div class="kpi-card"><div class="kpi-title">Pausa</div><div class="kpi-value">{int((df["Status"]=="Pausa").sum())}</div></div>', unsafe_allow_html=True)
-with c4:
-    st.markdown(f'<div class="kpi-card"><div class="kpi-title">Altas</div><div class="kpi-value">{int((df["Status"]=="Alta").sum())}</div></div>', unsafe_allow_html=True)
-
-st.markdown("")
-
-# =========================
-# Aplicar filtros
-# =========================
-df_view = df.copy()
-if sel_status != "(Todos)":
-    df_view = df_view[df_view["Status"]==sel_status]
-if sel_prio != "(Todas)":
-    df_view = df_view[df_view["Prioridade"]==sel_prio]
-if q.strip():
-    ql = q.strip().lower()
-    mask = (
-        df_view["Nome"].str.lower().str.contains(ql, na=False) |
-        df_view["Responsavel"].str.lower().str.contains(ql, na=False) |
-        df_view["Telefone"].str.lower().str.contains(ql, na=False) |
-        df_view["Email"].str.lower().str.contains(ql, na=False) |
-        df_view["Diagnostico"].str.lower().str.contains(ql, na=False)
+def _card_caption(action: str, p: dict, diffs=None) -> str:
+    nome = p.get("Nome") or "(sem nome)"
+    pid  = p.get("PacienteID") or "-"
+    status = p.get("Status") or "-"
+    prio   = p.get("Prioridade") or "-"
+    linhas = []
+    if diffs:
+        linhas.append("<b>Atualizações</b>:")
+        for campo, antes, depois in diffs:
+            linhas.append(f"• <b>{_fmt_html(campo)}:</b> {_fmt_html(antes)} → <code>{_fmt_html(depois)}</code>")
+    caption = (
+        f"<b>Paciente {action}</b>\n"
+        f"<b>{_fmt_html(nome)}</b>  <i>({pid})</i>\n"
+        f"Status: <b>{_fmt_html(status)}</b> • Prioridade: <b>{_fmt_html(prio)}</b>\n\n"
+        + ("\n".join(linhas) if linhas else "")
     )
-    df_view = df_view[mask]
+    return caption
 
-# =========================
-# Barra de ações (fixa)
-# =========================
-st.markdown('<div class="action-bar">', unsafe_allow_html=True)
-ac1, ac2, ac3 = st.columns([1,1,2])
-with ac1:
-    st.download_button(
-        "⬇️ Exportar CSV",
-        data=df_view.to_csv(index=False).encode("utf-8"),
-        file_name="pacientes.csv",
-        mime="text/csv",
-        use_container_width=True
+# ===== Conexão =====
+ss = connect()
+try:
+    df, ws = read_ws(ss, "Pacientes", PAC_COLS)
+    df = df.reindex(columns=PAC_COLS).fillna("")
+except Exception as e:
+    st.error(f"Erro ao ler Pacientes: {e}")
+    st.stop()
+
+# ===== Seleção do paciente (buscável) =====
+q = st.text_input("Buscar (nome, tel, diagnóstico, responsável, e-mail)").strip().lower()
+df_sel = df.copy()
+if q:
+    m = (
+        df_sel["Nome"].str.lower().str.contains(q, na=False) |
+        df_sel["Telefone"].str.lower().str.contains(q, na=False) |
+        df_sel["Diagnostico"].str.lower().str.contains(q, na=False) |
+        df_sel["Responsavel"].str.lower().str.contains(q, na=False) |
+        df_sel["Email"].str.lower().str.contains(q, na=False)
     )
-with ac2:
-    tel_raw = st.text_input("Telefone p/ WhatsApp (somente números)", "", key="wa_tel")
-    if st.button("Abrir WhatsApp", use_container_width=True):
-        t = re.sub(r"\D+", "", tel_raw or "")
-        if t:
-            st.markdown(f'[Clique para abrir o WhatsApp](https://wa.me/55{t})')
-        else:
-            st.warning("Informe um telefone válido (apenas números).")
-with ac3:
-    st.caption("Edite a tabela abaixo e clique em **Salvar alterações**.")
-st.markdown('</div>', unsafe_allow_html=True)
+    df_sel = df_sel[m]
 
-# =========================
-# Lista (editável)
-# =========================
-st.subheader("📋 Lista de Pacientes")
+opts = [f"{r['Nome']} — {r['PacienteID']}" for _, r in df_sel.sort_values("Nome").iterrows()]
+choice = st.selectbox("Escolha o paciente", ["(selecione)"] + opts, index=0)
 
-cols_show = [
-    "PacienteID","Nome","Responsavel","Telefone","Email","DataNascimento",
-    "Diagnostico","Convenio","Status","Prioridade","FotoURL","Observacoes"
-]
+if choice == "(selecione)":
+    st.info("Use a busca acima para localizar um paciente e visualizar/editar.")
+    st.stop()
 
-# Normalização de tipos (evita erro do data_editor)
-df_view = df_view.copy().reindex(columns=PAC_COLS).fillna("")
-for c in PAC_COLS:
-    df_view[c] = df_view[c].astype(str)
+pid = choice.rsplit("—", 1)[-1].strip()
+rec = df[df["PacienteID"]==pid].iloc[0].to_dict()
 
-# Opções dinâmicas
-status_defaults = ["Ativo", "Pausa", "Alta"]
-prio_defaults   = ["Normal", "Alta", "Urgente"]
-status_opts = sorted(set(df_view["Status"].unique()) | set(status_defaults) | {""})
-prio_opts   = sorted(set(df_view["Prioridade"].unique()) | set(prio_defaults) | {""})
-df_view.loc[~df_view["Status"].isin(status_opts), "Status"] = ""
-df_view.loc[~df_view["Prioridade"].isin(prio_opts), "Prioridade"] = ""
-
-edited_df = st.data_editor(
-    df_view[cols_show].reset_index(drop=True),
-    hide_index=True,
-    use_container_width=True,
-    disabled=["PacienteID"],
-    column_config={
-        "PacienteID": st.column_config.TextColumn("PacienteID"),
-        "Nome": st.column_config.TextColumn("Nome", help="Nome completo do paciente"),
-        "Responsavel": st.column_config.TextColumn("Responsável"),
-        "Telefone": st.column_config.TextColumn("Telefone"),
-        "Email": st.column_config.TextColumn("Email"),
-        "DataNascimento": st.column_config.TextColumn("Nascimento (DD/MM/AAAA)"),
-        "Diagnostico": st.column_config.TextColumn("Diagnóstico(s)", width="large"),
-        "Convenio": st.column_config.TextColumn("Convênio"),
-        "Status": st.column_config.SelectboxColumn("Status", options=status_opts),
-        "Prioridade": st.column_config.SelectboxColumn("Prioridade", options=prio_opts),
-        "FotoURL": st.column_config.TextColumn("FotoURL", help="URL de imagem (Drive/Cloudinary)"),
-        "Observacoes": st.column_config.TextColumn("Observações", width="large"),
-    },
-    key="grid_pacientes",
-)
-
-# Reconstruir df mesclado para salvar
-df_to_save = df.copy()
-orig_by_id = df_to_save.set_index("PacienteID")
-edit_by_id = edited_df.set_index("PacienteID")
-common_ids = edit_by_id.index.intersection(orig_by_id.index)
-orig_by_id.loc[common_ids, cols_show[1:]] = edit_by_id.loc[common_ids, cols_show[1:]]
-df_merged = orig_by_id.reset_index()
-
-save_col1, save_col2 = st.columns([1,1])
-with save_col1:
-    if st.button("💾 Salvar alterações", type="primary", use_container_width=True):
+# ===== Card de visualização =====
+col1, col2 = st.columns([1,2])
+with col1:
+    foto = (rec.get("FotoURL") or "").strip()
+    if foto:
         try:
-            out = df_merged[PAC_COLS].fillna("")
-            values = [PAC_COLS] + out.values.tolist()
-            ws.update("A1", values)
-            st.success("Alterações salvas na planilha ✅")
+            st.image(foto, use_container_width=True)
+        except Exception:
+            st.caption("Não foi possível carregar a imagem.")
+    else:
+        st.caption("Sem foto")
+with col2:
+    st.subheader(rec.get("Nome") or "(sem nome)")
+    st.markdown(f"**PacienteID:** {rec.get('PacienteID')}")
+    st.markdown(f"**Status:** {rec.get('Status') or '—'}  •  **Prioridade:** {rec.get('Prioridade') or '—'}")
+    st.markdown(f"**Nascimento:** {rec.get('DataNascimento') or '—'}")
+    st.markdown(f"**Responsável:** {rec.get('Responsavel') or '—'}")
+    st.markdown(f"**Telefone:** {rec.get('Telefone') or '—'}")
+    st.markdown(f"**Email:** {rec.get('Email') or '—'}")
+    st.markdown(f"**Convênio:** {rec.get('Convenio') or '—'}")
+    st.markdown(f"**Diagnóstico:** {rec.get('Diagnostico') or '—'}")
+    st.markdown(f"**Observações:** {rec.get('Observacoes') or '—'}")
+
+st.markdown("---")
+
+# ===== Editor =====
+st.subheader("✏️ Editar cadastro (com Telegram)")
+c1, c2 = st.columns(2)
+with c1:
+    nome_e = st.text_input("Nome*", rec.get("Nome",""))
+    nasc_e = st.text_input("Nascimento (DD/MM/AAAA)", rec.get("DataNascimento",""))
+    resp_e = st.text_input("Responsável", rec.get("Responsavel",""))
+    tel_e  = st.text_input("Telefone", rec.get("Telefone",""))
+    email_e= st.text_input("Email", rec.get("Email",""))
+    conv_e = st.text_input("Convênio (ou 'Particular')", rec.get("Convenio",""))
+with c2:
+    diag_e = st.text_area("Diagnóstico(s)", rec.get("Diagnostico",""))
+    status_e = st.selectbox("Status", ["Ativo","Pausa","Alta"], index=["Ativo","Pausa","Alta"].index(rec.get("Status","Ativo")) if rec.get("Status","Ativo") in ["Ativo","Pausa","Alta"] else 0)
+    prio_e   = st.selectbox("Prioridade", ["Normal","Alta","Urgente"], index=["Normal","Alta","Urgente"].index(rec.get("Prioridade","Normal")) if rec.get("Prioridade","Normal") in ["Normal","Alta","Urgente"] else 0)
+    foto_e = st.text_input("FotoURL (Drive/Cloudinary)", rec.get("FotoURL",""))
+    obs_e  = st.text_area("Observações", rec.get("Observacoes",""))
+
+if st.button("💾 Salvar alterações e notificar", type="primary"):
+    if not nome_e.strip():
+        st.error("Informe o nome do paciente.")
+    else:
+        try:
+            new_rec = {
+                "PacienteID": rec["PacienteID"],
+                "Nome": nome_e.strip(),
+                "DataNascimento": _to_date_str(nasc_e),
+                "Responsavel": (resp_e or "").strip(),
+                "Telefone": (tel_e or "").strip(),
+                "Email": (email_e or "").strip(),
+                "Diagnostico": (diag_e or "").strip(),
+                "Convenio": (conv_e or "").strip() or "Particular",
+                "Status": status_e,
+                "Prioridade": prio_e,
+                "FotoURL": (foto_e or "").strip(),
+                "Observacoes": (obs_e or "").strip()
+            }
+            diffs = _diff_changes(rec, new_rec)
+
+            # aplica no df e grava
+            df_apply = df.copy()
+            idx = df_apply.index[df_apply["PacienteID"]==new_rec["PacienteID"]][0]
+            for k,v in new_rec.items():
+                df_apply.at[idx, k] = v
+            out = df_apply[PAC_COLS].fillna("")
+            # atualiza a planilha inteira (mantém consistência)
+            ws.update("A1", [PAC_COLS] + out.values.tolist())
+
+            caption = _card_caption("Editado", new_rec, diffs)
+            _tg_send_photo_card(caption, _photo_or_logo(new_rec))
+
+            st.success("Paciente atualizado e Telegram notificado ✅")
             st.cache_data.clear()
-            st.rerun()
+            st.experimental_rerun()
         except APIError as e:
-            _render_perm_help(e)
             st.error("Erro do Google Sheets ao salvar.")
         except Exception as e:
             st.error(f"Erro ao salvar: {e}")
-
-with save_col2:
-    ids_para_excluir = st.multiselect(
-        "Selecionar pacientes para apagar",
-        options=sorted(df_view["PacienteID"].unique().tolist()),
-        help="Escolha um ou mais PacienteID para exclusão."
-    )
-    if st.button("🗑️ Excluir selecionados", use_container_width=True, disabled=(len(ids_para_excluir)==0)):
-        try:
-            df_drop = df_to_save[~df_to_save["PacienteID"].isin(ids_para_excluir)]
-            out = df_drop[PAC_COLS].fillna("")
-            values = [PAC_COLS] + out.values.tolist()
-            ws.update("A1", values)
-            st.success(f"{len(ids_para_excluir)} registro(s) excluído(s) ✅")
-            st.cache_data.clear()
-            st.rerun()
-        except APIError as e:
-            _render_perm_help(e)
-            st.error("Erro do Google Sheets ao excluir.")
-        except Exception as e:
-            st.error(f"Erro ao excluir: {e}")
-
-# =========================
-# Detalhes rápidos (com avatar/foto, no estilo do detalhe)
-# =========================
-st.markdown("---")
-st.subheader("🔍 Detalhes rápidos")
-
-if edited_df.empty:
-    st.caption("Nenhum paciente nos filtros atuais.")
-else:
-    for _, row in edited_df.iterrows():
-        nome = str(row.get("Nome","")).strip() or "(sem nome)"
-        status = str(row.get("Status","")).strip() or "-"
-        prio = str(row.get("Prioridade","")).strip() or "-"
-        with st.expander(f"{nome} — {status} • {prio}"):
-            cimg, cinfo = st.columns([1,3])
-            with cimg:
-                foto = str(row.get("FotoURL","")).strip()
-                if foto:
-                    try:
-                        st.image(foto, caption=None, use_container_width=True)
-                    except Exception:
-                        st.caption("Não foi possível carregar a imagem.")
-                else:
-                    st.markdown(f"""
-                        <div class="avatar" style="display:flex;align-items:center;justify-content:center;font-weight:800;">
-                            {nome[0:2].upper()}
-                        </div>
-                    """, unsafe_allow_html=True)
-                    st.caption("Sem foto")
-            with cinfo:
-                st.markdown(
-                    " ".join([
-                        f'<span class="badge {"ok" if status=="Ativo" else ("warn" if status=="Pausa" else "err")}">Status: {status}</span>',
-                        f'<span class="badge">Prioridade: {prio}</span>',
-                        f'<span class="badge">Convênio: {str(row.get("Convenio","") or "Particular")}</span>',
-                    ]),
-                    unsafe_allow_html=True
-                )
-                st.markdown(f"**PacienteID:** {row['PacienteID']}")
-                st.markdown(f"**Responsável:** {row.get('Responsavel') or '—'}")
-                st.markdown(f"**Telefone:** {row.get('Telefone') or '—'}")
-                st.markdown(f"**Email:** {row.get('Email') or '—'}")
-                st.markdown(f"**Nascimento:** {row.get('DataNascimento') or '—'}")
-                st.markdown(f"**Convênio:** {row.get('Convenio') or '—'}")
-                st.markdown(f"**Diagnóstico:** {row.get('Diagnostico') or '—'}")
-                st.markdown(f"**Observações:** {row.get('Observacoes') or '—'}")
-
-# =========================
-# Cadastro — Novo paciente (mesmo visual)
-# =========================
-st.markdown("---")
-st.subheader("➕ Cadastrar novo")
-
-with st.form("novo_paciente"):
-    c1, c2 = st.columns(2)
-    with c1:
-        nome = st.text_input("Nome*", "")
-        nasc = st.text_input("Data de nascimento (DD/MM/AAAA)", "")
-        resp = st.text_input("Responsável", "")
-        tel  = st.text_input("Telefone", "")
-        email= st.text_input("Email", "")
-        conv = st.text_input("Convênio (ou 'Particular')", "")
-    with c2:
-        diag = st.text_area("Diagnóstico(s)", "")
-        status = st.selectbox("Status", ["Ativo","Pausa","Alta"], index=0)
-        prio = st.selectbox("Prioridade", ["Normal","Alta","Urgente"], index=0)
-        foto = st.text_input("FotoURL (Drive/Cloudinary)", "")
-        obs  = st.text_area("Observações", "")
-    ok = st.form_submit_button("Salvar")
-
-    if ok:
-        if not nome.strip():
-            st.error("Informe o nome do paciente.")
-        else:
-            try:
-                pid = new_id("P")
-                record = {
-                    "PacienteID": pid,
-                    "Nome": nome.strip(),
-                    "DataNascimento": _to_date_str(nasc),
-                    "Responsavel": (resp or "").strip(),
-                    "Telefone": (tel or "").strip(),
-                    "Email": (email or "").strip(),
-                    "Diagnostico": (diag or "").strip(),
-                    "Convenio": (conv or "").strip() or "Particular",
-                    "Status": status,
-                    "Prioridade": prio,
-                    "FotoURL": (foto or "").strip(),
-                    "Observacoes": (obs or "").strip()
-                }
-                append_rows(ws, [record], default_headers=PAC_COLS)
-                st.success(f"Paciente cadastrado: {nome} ({pid}) ✅")
-                st.cache_data.clear()
-                st.rerun()
-            except APIError as e:
-                _render_perm_help(e)
-                st.error("Erro do Google Sheets ao salvar novo paciente.")
-            except Exception as e:
-                st.error(f"Erro ao salvar novo paciente: {e}")
