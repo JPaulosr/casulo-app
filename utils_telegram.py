@@ -6,10 +6,10 @@ import streamlit as st
 
 # Quais chaves vamos aceitar (secrets e/ou env). Nada hardcoded.
 _TOKEN_KEYS  = ("TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN")
-_CHATID_KEYS = ("TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID_CASULO")
+_CHATID_KEYS = ("TELEGRAM_CHAT_ID", "TELEGRAM_CHAT_ID_CASULO", "TELEGRAM_CHAT_ID_PADRAO")
 
 def _read_first(keys: tuple[str, ...]) -> str:
-    """lê a 1ª chave que existir (st.secrets ou env); retorna '' se nada achado"""
+    """Lê a 1ª chave que existir (st.secrets ou env); retorna '' se nada achado."""
     # 1) secrets
     try:
         for k in keys:
