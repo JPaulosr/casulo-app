@@ -20,38 +20,80 @@ st.title("📄 Detalhe do Paciente")
 
 CLINIC_NAME = "Espaço Terapêutico Casulo"
 
-# Telegram (usa secrets e cai para as constantes abaixo, se não houver)
-TELEGRAM_TOKEN_FALLBACK = ""
-TELEGRAM_CHATID_FALLBACK = ""
+# =========================
+# Telegram (robusto: múltiplas chaves + env + diagnóstico)
+# =========================
+TELEGRAM_TOKEN_FALLBACK = (
+    os.getenv("TELEGRAM_TOKEN", "")
+    or os.getenv("TELEGRAM_BOT_TOKEN", "")
+).strip()
 
-def _tg_token():
+TELEGRAM_CHATID_FALLBACK = (
+    os.getenv("TELEGRAM_CHAT_ID", "")
+    or os.getenv("TELEGRAM_CHAT_ID_CASULO", "")
+    or os.getenv("TELEGRAM_CHAT_ID_PADRAO", "")
+).strip()
+
+_TELEGRAM_KEY_CANDIDATES = (
+    "TELEGRAM_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+)
+_CHATID_KEY_CANDIDATES = (
+    "TELEGRAM_CHAT_ID",
+    "TELEGRAM_CHAT_ID_CASULO",
+    "TELEGRAM_CHAT_ID_PADRAO",
+)
+
+def _tg_token() -> str:
     try:
-        tok = (st.secrets.get("TELEGRAM_TOKEN", "") or "").strip()
-        return tok or TELEGRAM_TOKEN_FALLBACK
+        for k in _TELEGRAM_KEY_CANDIDATES:
+            v = (st.secrets.get(k, "") or "").strip()
+            if v:
+                return v
     except Exception:
-        return TELEGRAM_TOKEN_FALLBACK
+        pass
+    return TELEGRAM_TOKEN_FALLBACK
 
-def _tg_chat_id():
+def _tg_chat_id() -> str:
     try:
-        cid = (st.secrets.get("TELEGRAM_CHAT_ID", "") or "").strip()
-        return cid or TELEGRAM_CHATID_FALLBACK
+        for k in _CHATID_KEY_CANDIDATES:
+            v = (st.secrets.get(k, "") or "").strip()
+            if v:
+                return v
     except Exception:
-        return TELEGRAM_CHATID_FALLBACK
+        pass
+    return TELEGRAM_CHATID_FALLBACK
 
-def tg_send_pdf(file_bytes: bytes, filename: str, caption: str = "") -> tuple[bool,str]:
-    token = _tg_token()
-    chat_id = _tg_chat_id()
-    if not token or not chat_id:
-        return False, "TELEGRAM_TOKEN ou CHAT_ID ausente."
+def tg_ready() -> tuple[bool, bool, dict]:
+    tok = _tg_token()
+    cid = _tg_chat_id()
+    info = {
+        "prefer_keys_token": list(_TELEGRAM_KEY_CANDIDATES),
+        "prefer_keys_chat":  list(_CHATID_KEY_CANDIDATES),
+        "token_source": "secrets/env" if tok else "MISSING",
+        "chat_source":  "secrets/env" if cid else "MISSING",
+        "token_masked": (tok[:6] + "…" + tok[-4:]) if tok else "",
+        "chat_id": cid,
+    }
+    return bool(tok), bool(cid), info
+
+def tg_send_pdf(file_bytes: bytes, filename: str, caption: str = "") -> tuple[bool, str]:
+    token_ok, chat_ok, dbg = tg_ready()
+    if not (token_ok and chat_ok):
+        return (
+            False,
+            f"Telegram indisponível. Token OK? {token_ok} | ChatID OK? {chat_ok} | "
+            f"Procuradas: token {dbg['prefer_keys_token']} chat {dbg['prefer_keys_chat']}"
+        )
     try:
-        url = f"https://api.telegram.org/bot{token}/sendDocument"
+        url = f"https://api.telegram.org/bot{_tg_token()}/sendDocument"
         files = {"document": (filename, file_bytes, "application/pdf")}
-        data = {"chat_id": chat_id, "caption": caption}
+        data = {"chat_id": _tg_chat_id(), "caption": (caption or "")[:1024]}
         r = requests.post(url, data=data, files=files, timeout=60)
-        ok = (r.status_code == 200 and r.json().get("ok"))
-        return (ok, "" if ok else r.text)
+        ok = r.ok and r.json().get("ok")
+        return (bool(ok), "" if ok else f"HTTP {r.status_code}: {r.text}")
     except Exception as e:
-        return False, str(e)
+        return False, f"Erro de rede: {e}"
 
 # =========================
 # Helpers
