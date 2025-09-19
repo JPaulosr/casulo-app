@@ -2,16 +2,14 @@
 # pages/02_Paciente_Detalhe.py
 
 import io
-import os
 import base64
-import requests
 from datetime import datetime, date
 import pandas as pd
 import numpy as np
 import streamlit as st
 
-from utils_casulo import connect, read_ws, append_rows, new_id
-from utils_telegram import tg_send_pdf, tg_debug_expander  # <-- NOVO
+from utils_casulo import connect, read_ws, append_rows, new_id  # usa o appender SEGURO
+from utils_telegram import tg_send_document, tg_diag_markdown, tg_ready
 
 # =========================
 # Config & constantes
@@ -20,6 +18,7 @@ st.set_page_config(page_title="Casulo — Paciente", page_icon="📄", layout="w
 st.title("📄 Detalhe do Paciente")
 
 CLINIC_NAME = "Espaço Terapêutico Casulo"
+DEFAULT_PROFISSIONAL = (st.secrets.get("DEFAULT_PROFISSIONAL") or "Fernanda").strip()
 
 # =========================
 # Helpers
@@ -27,8 +26,7 @@ CLINIC_NAME = "Espaço Terapêutico Casulo"
 DATA_FMT = "%d/%m/%Y"
 
 def to_date(s):
-    if s is None:
-        return None
+    if s is None: return None
     s = str(s).strip()
     for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
         try:
@@ -44,6 +42,7 @@ def brl(v: float) -> str:
         return "R$ 0,00"
 
 def _clean(df: pd.DataFrame, cols: list[str] | None = None) -> pd.DataFrame:
+    """Higieniza NaN -> '', remove 'nan' textual, trim."""
     if df is None or df.empty:
         return df
     df = df.replace({np.nan: ""})
@@ -67,12 +66,13 @@ SES_COLS = ["SessaoID","PacienteID","Data","HoraInicio","HoraFim",
 PAG_COLS = ["PagamentoID","PacienteID","Data","Forma","Bruto","Liquido",
             "TaxaValor","TaxaPct","Referencia","Obs","ReciboURL"]
 
+# Relatórios do paciente (layout novo)
 REL_COLS = ["RelatorioID","PacienteID","Data","Tipo","Titulo","Autor","Texto","ArquivoURL"]
 
 df_pac, _ = read_ws(ss, "Pacientes",  PAC_COLS)
 df_ses, _ = read_ws(ss, "Sessoes",    SES_COLS)
 df_pag, _ = read_ws(ss, "Pagamentos", PAG_COLS)
-df_rel, ws_rel = read_ws(ss, "Relatorios", REL_COLS)
+df_rel, ws_rel = read_ws(ss, "Relatorios", REL_COLS)  # cria se não existe
 
 # limpeza
 df_pac = _clean(df_pac, ["Nome","FotoURL","Responsavel","Telefone","Diagnostico","Convenio","Status","Prioridade","Observacoes"])
@@ -166,8 +166,7 @@ with tab_visao:
                 st.info("Nada aqui.")
             else:
                 for d, grupo in bloco.groupby("__dt"):
-                    if pd.isna(d): 
-                        continue
+                    if pd.isna(d): continue
                     st.markdown(f"**{d.strftime(DATA_FMT)} — Sessão**")
                     for _, r in grupo.iterrows():
                         hi = str(r.get("HoraInicio","") or "").strip()
@@ -195,6 +194,7 @@ def _compose_md(rows: pd.DataFrame, nome_paciente: str) -> str:
     return "\n".join(parts)
 
 def _gerar_pdf_pro(md_text: str, nome_paciente: str, clinic_name: str) -> bytes:
+    """Gera PDF profissional com cabeçalho e rodapé."""
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.enums import TA_LEFT
@@ -229,7 +229,9 @@ def _gerar_pdf_pro(md_text: str, nome_paciente: str, clinic_name: str) -> bytes:
         canvas.drawRightString(A4[0]-18*mm, 12*mm, f"Página {doc_.page}")
         canvas.restoreState()
 
-    story = [Paragraph(f"Relatórios — {nome_paciente}", h1), Spacer(1, 8)]
+    story = []
+    story.append(Paragraph(f"Relatórios — {nome_paciente}", h1))
+    story.append(Spacer(1, 8))
 
     for ln in md_text.splitlines():
         if ln.startswith("# "):
@@ -257,6 +259,10 @@ def _preview_pdf_inline(pdf_bytes: bytes, filename: str):
 # ---------- Relatórios ----------
 with tab_rel:
     st.subheader("Relatórios do paciente")
+
+    # Diagnóstico do Telegram (ajuda quando dá erro)
+    with st.expander("🔧 Diagnóstico do Telegram"):
+        st.markdown(tg_diag_markdown())
 
     # Filtros
     colf1, colf2, colf3 = st.columns([1,1,2])
@@ -302,9 +308,6 @@ with tab_rel:
     with colbtn5:
         prev_ok = st.button("👁️ Pré-visualizar no app", use_container_width=True)
 
-    # Diagnóstico (pronto + override)
-    tg_debug_expander()
-
     rows_sel = rel_vis[rel_vis["RelatorioID"].astype(str).isin(sel)].copy()
 
     if md_ok:
@@ -324,7 +327,7 @@ with tab_rel:
             if pdf_ok:
                 st.download_button("Baixar PDF", data=pdf_bytes, file_name=f"relatorios_{pid}.pdf")
             if tg_ok:
-                ok, err = tg_send_pdf(pdf_bytes, f"relatorios_{pid}.pdf", caption=f"Relatórios — {nome_sel}")
+                ok, err = tg_send_document(pdf_bytes, f"relatorios_{pid}.pdf", caption=f"Relatórios — {nome_sel}")
                 if ok: st.success("Enviado ao Telegram ✅")
                 else:  st.error(f"Falhou ao enviar: {err}")
             if prev_ok:
@@ -355,6 +358,7 @@ with tab_rel:
     st.markdown("---")
     st.subheader("Novo relatório")
 
+    # ====== Formulário de novo relatório ======
     with st.form("novo_rel"):
         c1, c2 = st.columns([2,1])
         with c1:
@@ -363,7 +367,7 @@ with tab_rel:
             data_rel = st.date_input("Data", value=date.today(), format="YYYY/MM/DD")
 
         tipo = st.selectbox("Tipo", ["Evolução","Avaliação","Anamnese","Alta","Outro"], index=0)
-        autor = st.text_input("Autor", "Fernanda")
+        autor = st.text_input("Autor", DEFAULT_PROFISSIONAL)
         texto = st.text_area("Texto (anotações, evolução, anamnese...)", height=220)
         arq_url = st.text_input("ArquivoURL (link opcional — Drive/Cloudinary)", "")
 
@@ -415,8 +419,7 @@ with tab_fin:
 # ---------- Documentos ----------
 with tab_docs:
     st.subheader("Documentos & anexos")
-    st.info("Para anexar um link/arquivo, use o campo **ArquivoURL** ao criar um Relatório acima.\n\n"
-            "Se preferir uma aba dedicada 'Documentos' na planilha (ex.: colunas: PacienteID, Titulo, Data, URL, Obs), dá pra adicionar depois.")
+    st.info("Para anexar um link/arquivo, use o campo **ArquivoURL** ao criar um Relatório acima.")
     rel_com_link = df_rel_p[df_rel_p.get("ArquivoURL","").astype(str).str.strip() != ""].copy()
     if rel_com_link.empty:
         st.caption("Nenhum link anexado ainda (ArquivoURL está vazio nos relatórios).")
