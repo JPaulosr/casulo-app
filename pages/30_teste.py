@@ -1,32 +1,65 @@
+# -*- coding: utf-8 -*-
 # pages/02_Paciente_Detalhe.py
-import streamlit as st
-import pandas as pd
+
+import io
+import os
+import base64
+import requests
 from datetime import datetime, date
-from io import BytesIO
+import pandas as pd
+import numpy as np
+import streamlit as st
 
-# ---- utils do app
-from utils_casulo import connect, read_ws, append_rows, new_id
-try:
-    from utils_casulo import default_profissional
-except Exception:
-    def default_profissional():
-        return st.secrets.get("DEFAULT_PROFISSIONAL", "Fernanda")
+from utils_casulo import connect, read_ws, append_rows, new_id  # usa o appender SEGURO
 
-# ---- telegram (opcional, mas já preparado)
-try:
-    from utils_telegram import tg_send_document
-except Exception:
-    def tg_send_document(*args, **kwargs):
-        return False, "utils_telegram não encontrado."
-
-
+# =========================
+# Config & constantes
+# =========================
 st.set_page_config(page_title="Casulo — Paciente", page_icon="📄", layout="wide")
 st.title("📄 Detalhe do Paciente")
 
-# ---------------- helpers ----------------
+CLINIC_NAME = "Espaço Terapêutico Casulo"
+
+# Telegram (usa secrets e cai para as constantes abaixo, se não houver)
+TELEGRAM_TOKEN_FALLBACK = ""
+TELEGRAM_CHATID_FALLBACK = ""
+
+def _tg_token():
+    try:
+        tok = (st.secrets.get("TELEGRAM_TOKEN", "") or "").strip()
+        return tok or TELEGRAM_TOKEN_FALLBACK
+    except Exception:
+        return TELEGRAM_TOKEN_FALLBACK
+
+def _tg_chat_id():
+    try:
+        cid = (st.secrets.get("TELEGRAM_CHAT_ID", "") or "").strip()
+        return cid or TELEGRAM_CHATID_FALLBACK
+    except Exception:
+        return TELEGRAM_CHATID_FALLBACK
+
+def tg_send_pdf(file_bytes: bytes, filename: str, caption: str = "") -> tuple[bool,str]:
+    token = _tg_token()
+    chat_id = _tg_chat_id()
+    if not token or not chat_id:
+        return False, "TELEGRAM_TOKEN ou CHAT_ID ausente."
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendDocument"
+        files = {"document": (filename, file_bytes, "application/pdf")}
+        data = {"chat_id": chat_id, "caption": caption}
+        r = requests.post(url, data=data, files=files, timeout=60)
+        ok = (r.status_code == 200 and r.json().get("ok"))
+        return (ok, "" if ok else r.text)
+    except Exception as e:
+        return False, str(e)
+
+# =========================
+# Helpers
+# =========================
+DATA_FMT = "%d/%m/%Y"
+
 def to_date(s):
-    if s is None:
-        return None
+    if s is None: return None
     s = str(s).strip()
     for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
         try:
@@ -41,46 +74,51 @@ def brl(v: float) -> str:
     except Exception:
         return "R$ 0,00"
 
-def to_float(x) -> float:
-    try:
-        s = str(x).strip().replace("R$", "").replace(" ", "")
-        if s.count(",")==1 and s.count(".")>=1:
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            s = s.replace(",", ".")
-        return float(s)
-    except Exception:
-        return 0.0
+def _clean(df: pd.DataFrame, cols: list[str] | None = None) -> pd.DataFrame:
+    """Higieniza NaN -> '', remove 'nan' textual, trim."""
+    if df is None or df.empty:
+        return df
+    df = df.replace({np.nan: ""})
+    if cols:
+        for c in cols:
+            if c in df.columns:
+                df[c] = df[c].astype(str).replace("nan", "").str.strip()
+    return df
 
-# ---------------- conexão + colunas ----------------
+# =========================
+# Leitura das planilhas
+# =========================
 ss = connect()
 
 PAC_COLS = ["PacienteID","Nome","DataNascimento","Responsavel","Telefone","Email",
             "Diagnostico","Convenio","Status","Prioridade","FotoURL","Observacoes"]
 
-SES_COLS = ["SessaoID","PacienteID","Data","HoraInicio","HoraFim","Profissional","Status",
-            "Tipo","ObjetivosTrabalhados","Observacoes","AnexosURL"]
+SES_COLS = ["SessaoID","PacienteID","Data","HoraInicio","HoraFim",
+            "Profissional","Status","Tipo","ObjetivosTrabalhados","Observacoes","AnexosURL"]
 
-# nova aba de relatórios
-REL_COLS = ["RelatorioID","PacienteID","Data","Tipo","Titulo","Texto","Autor","Privado","AnexosURL"]
+PAG_COLS = ["PagamentoID","PacienteID","Data","Forma","Bruto","Liquido",
+            "TaxaValor","TaxaPct","Referencia","Obs","ReciboURL"]
 
-PAG_COLS = ["PagamentoID","PacienteID","Data","Forma","Bruto","Liquido","TaxaValor","TaxaPct","Referencia","Obs","ReciboURL"]
+# Relatórios do paciente (layout novo)
+REL_COLS = ["RelatorioID","PacienteID","Data","Tipo","Titulo","Autor","Texto","ArquivoURL"]
 
 df_pac, _ = read_ws(ss, "Pacientes",  PAC_COLS)
 df_ses, _ = read_ws(ss, "Sessoes",    SES_COLS)
-df_rel, ws_rel = read_ws(ss, "Relatorios", REL_COLS)           # <— cria/garante aba Relatorios
 df_pag, _ = read_ws(ss, "Pagamentos", PAG_COLS)
+df_rel, ws_rel = read_ws(ss, "Relatorios", REL_COLS)  # cria se não existe
 
-# normalizações
-if not df_ses.empty:
-    df_ses["__dt"] = df_ses["Data"].apply(to_date)
-if not df_pag.empty:
-    df_pag["__dt"] = df_pag["Data"].apply(to_date)
-    df_pag["__brl"] = df_pag["Liquido"].apply(to_float)
+# limpeza
+df_pac = _clean(df_pac, ["Nome","FotoURL","Responsavel","Telefone","Diagnostico","Convenio","Status","Prioridade","Observacoes"])
+df_ses = _clean(df_ses, ["Data","HoraInicio","HoraFim","Profissional","Status","Tipo","ObjetivosTrabalhados","Observacoes","AnexosURL"])
+df_pag = _clean(df_pag, ["Data","Forma","Bruto","Liquido","TaxaValor","TaxaPct","Referencia","Obs","ReciboURL"])
+df_rel = _clean(df_rel, ["RelatorioID","PacienteID","Data","Tipo","Titulo","Autor","Texto","ArquivoURL"])
 
-# ---------------- seleção por NOME ----------------
+# =========================
+# Selecionar paciente por nome
+# =========================
 nomes = [""] + sorted(df_pac["Nome"].astype(str).str.strip().unique().tolist())
 nome_sel = st.selectbox("Paciente", nomes, index=0, placeholder="Digite o nome…")
+
 if not nome_sel:
     st.info("Selecione um paciente pelo nome.")
     st.stop()
@@ -89,289 +127,351 @@ p_row = df_pac[df_pac["Nome"].astype(str).str.strip() == nome_sel].head(1)
 if p_row.empty:
     st.warning("Paciente não encontrado.")
     st.stop()
+
 p = p_row.iloc[0]
 pid = str(p["PacienteID"])
 
-# ---------------- Header do paciente ----------------
-colA, colB = st.columns([1,3])
-with colA:
-    foto = str(p.get("FotoURL","") or "").strip()
+# =========================
+# Header — foto + dados
+# =========================
+col1, col2 = st.columns([1,3])
+with col1:
+    foto = str(p.get("FotoURL","")).strip()
     if foto:
-        st.image(foto, caption=p.get("Nome",""), width=220)
-with colB:
+        st.image(foto, caption=p.get("Nome",""), width=260)
+with col2:
     st.markdown(f"## {p.get('Nome','')}")
     st.write(f"**Responsável:** {p.get('Responsavel','-')}  |  **Telefone:** {p.get('Telefone','-')}")
     st.write(f"**Diagnóstico:** {p.get('Diagnostico','-')}")
     st.write(f"**Convênio:** {p.get('Convenio','-')}  |  **Status:** {p.get('Status','-')}  |  **Prioridade:** {p.get('Prioridade','-')}")
-    if str(p.get("Observacoes","")).strip():
-        st.caption(p.get("Observacoes",""))
-
-# ---------------- KPIs do paciente ----------------
-ses_cli = df_ses[df_ses["PacienteID"].astype(str) == pid] if not df_ses.empty else df_ses.iloc[0:0]
-rel_cli = df_rel[df_rel["PacienteID"].astype(str) == pid] if not df_rel.empty else df_rel.iloc[0:0]
-pag_cli = df_pag[df_pag["PacienteID"].astype(str) == pid] if not df_pag.empty else df_pag.iloc[0:0]
-
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Sessões", int(len(ses_cli)))
-k2.metric("Recebido (líquido)", brl(float(pag_cli["__brl"].sum()) if not pag_cli.empty else 0.0))
-k3.metric("Relatórios", int(len(rel_cli)))
-ultima_data = None
-if not ses_cli.empty and "__dt" in ses_cli:
-    _ok = ses_cli.dropna(subset=["__dt"])
-    if not _ok.empty:
-        ultima_data = _ok["__dt"].max().strftime("%d/%m/%Y")
-k4.metric("Última sessão", ultima_data or "—")
+    st.caption(f"ID interno: {pid}")
 
 st.divider()
 
-# ---------------- Tabs ----------------
-tab_geral, tab_rel, tab_ses, tab_fin, tab_docs = st.tabs(
-    ["👀 Visão geral", "🧾 Relatórios", "📝 Sessões", "💰 Financeiro", "📎 Documentos"]
+# =========================
+# KPIs do paciente
+# =========================
+df_ses_p = df_ses[df_ses["PacienteID"].astype(str) == pid].copy()
+df_pag_p = df_pag[df_pag["PacienteID"].astype(str) == pid].copy()
+df_rel_p = df_rel[df_rel["PacienteID"].astype(str) == pid].copy()
+
+df_ses_p["__dt"] = df_ses_p.get("Data","").apply(to_date)
+df_pag_p["__dt"] = df_pag_p.get("Data","").apply(to_date)
+df_pag_p["__liq"] = pd.to_numeric(df_pag_p.get("Liquido",0), errors="coerce").fillna(0)
+
+total_sessoes = int(len(df_ses_p))
+realizadas = int((df_ses_p.get("Status","").astype(str).str.lower() == "realizada").sum())
+recebido_liq = float(df_pag_p["__liq"].sum())
+qtd_relatorios = int(len(df_rel_p))
+ultima_sessao = df_ses_p["__dt"].dropna().max() if not df_ses_p.empty else None
+
+k1, k2, k3, k4, k5 = st.columns(5)
+k1.metric("Sessões", total_sessoes)
+k2.metric("Realizadas", realizadas)
+k3.metric("Recebido (líquido)", brl(recebido_liq))
+k4.metric("Relatórios", qtd_relatorios)
+k5.metric("Última sessão", ultima_sessao.strftime(DATA_FMT) if ultima_sessao else "-")
+
+# =========================
+# Abas
+# =========================
+tab_visao, tab_rel, tab_ses, tab_fin, tab_docs = st.tabs(
+    ["👁️ Visão geral","📄 Relatórios","📝 Sessões","💰 Financeiro","📎 Documentos"]
 )
 
-# =============== Visão Geral: timeline simples ===============
-with tab_geral:
+# ---------- Visão geral ----------
+with tab_visao:
     st.subheader("Linha do tempo")
-    eventos = []
+    df_ses_p["__ord_h"] = pd.to_datetime(df_ses_p.get("HoraInicio",""), format="%H:%M", errors="coerce")
+    df_ses_p = df_ses_p.sort_values(["__dt","__ord_h"], ascending=[True, True])
 
-    # sessões
-    if not ses_cli.empty:
-        for _, r in ses_cli.iterrows():
-            d = to_date(r.get("Data",""))
-            if not d: continue
-            eventos.append({
-                "dt": d,
-                "tipo": "Sessão",
-                "titulo": str(r.get("Tipo","Terapia")),
-                "sub": f"{r.get('HoraInicio','--')}-{r.get('HoraFim','')} · {r.get('Profissional','') or default_profissional()} · {r.get('Status','Agendada')}"
-            })
+    s_status = df_ses_p.get("Status","").astype(str).str.lower()
+    blocos = {
+        "Agendadas/Confirmadas": df_ses_p[s_status.isin(["agendada","confirmada"])],
+        "Realizadas": df_ses_p[s_status == "realizada"],
+        "Faltas": df_ses_p[s_status == "falta"],
+        "Canceladas": df_ses_p[s_status == "cancelada"],
+    }
 
-    # relatórios
-    if not rel_cli.empty:
-        for _, r in rel_cli.iterrows():
-            d = to_date(r.get("Data",""))
-            if not d: continue
-            eventos.append({
-                "dt": d,
-                "tipo": "Relatório",
-                "titulo": str(r.get("Titulo","(sem título)")),
-                "sub": f"{r.get('Tipo','-')} · Autor: {r.get('Autor','') or default_profissional()}"
-            })
+    for titulo, bloco in blocos.items():
+        with st.expander(f"{titulo} ({len(bloco)})", expanded=(titulo=="Agendadas/Confirmadas")):
+            if bloco.empty:
+                st.info("Nada aqui.")
+            else:
+                for d, grupo in bloco.groupby("__dt"):
+                    if pd.isna(d): continue
+                    st.markdown(f"**{d.strftime(DATA_FMT)} — Sessão**")
+                    for _, r in grupo.iterrows():
+                        hi = str(r.get("HoraInicio","") or "").strip()
+                        hf = str(r.get("HoraFim","") or "").strip()
+                        prof = str(r.get("Profissional","") or "")
+                        tipo = str(r.get("Tipo","Terapia") or "Terapia")
+                        st.markdown(f"**{tipo}**  \n{hi}{('–'+hf) if hf else ''} · {prof}")
 
-    # ordenar do mais antigo -> mais novo
-    eventos = sorted(eventos, key=lambda x: x["dt"])
+# ---------- util: montar MD e gerar PDF PRO ----------
+def _compose_md(rows: pd.DataFrame, nome_paciente: str) -> str:
+    parts = [f"# Relatórios — {nome_paciente}", ""]
+    for _, r in rows.iterrows():
+        d = to_date(r.get("Data"))
+        dtxt = d.strftime(DATA_FMT) if d else "-"
+        parts += [
+            f"## {dtxt} — {str(r.get('Tipo','-'))} · {str(r.get('Titulo','(sem título)'))}",
+            f"**Autor:** {str(r.get('Autor','-'))}",
+            "",
+            str(r.get("Texto","")).strip(),
+            "",
+        ]
+        url = str(r.get("ArquivoURL","")).strip()
+        if url:
+            parts += [f"**Anexo:** {url}", ""]
+    return "\n".join(parts)
 
-    if not eventos:
-        st.info("Sem eventos para este paciente.")
-    else:
-        for e in eventos:
-            st.markdown(
-                f"**{e['dt'].strftime('%d/%m/%Y')}** — *{e['tipo']}*\n\n"
-                f"**{e['titulo']}**  \n"
-                f"<span style='color:#94a3b8'>{e['sub']}</span>",
-                unsafe_allow_html=True
-            )
-            st.markdown("---")
+def _gerar_pdf_pro(md_text: str, nome_paciente: str, clinic_name: str) -> bytes:
+    """
+    Gera PDF profissional com cabeçalho e rodapé (nome da clínica no rodapé).
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.enums import TA_LEFT
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.lib.units import mm
 
-# =============== RELATÓRIOS ===============
+    # fonte (usa Inter se existir, senão Helvetica)
+    try:
+        pdfmetrics.registerFont(TTFont("Inter", "Inter-Regular.ttf"))
+        pdfmetrics.registerFont(TTFont("Inter-Bold", "Inter-Bold.ttf"))
+        base_font = "Inter"
+    except Exception:
+        base_font = "Helvetica"
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=18*mm, rightMargin=18*mm, topMargin=18*mm, bottomMargin=18*mm
+    )
+    styles = getSampleStyleSheet()
+    h1 = ParagraphStyle('h1', parent=styles['Heading1'], alignment=TA_LEFT, spaceAfter=8, fontName=base_font)
+    h2 = ParagraphStyle('h2', parent=styles['Heading2'], alignment=TA_LEFT, spaceAfter=6, fontName=base_font)
+    p  = ParagraphStyle('p',  parent=styles['BodyText'],  leading=15, fontName=base_font)
+
+    def _header_footer(canvas, doc_):
+        # Cabeçalho
+        canvas.saveState()
+        canvas.setFont(base_font, 10)
+        canvas.drawString(18*mm, A4[1]-12*mm, f"Relatórios — {nome_paciente}")
+        # Rodapé com nome da clínica e nº da página
+        canvas.setFont(base_font, 10)
+        canvas.drawString(18*mm, 12*mm, clinic_name)
+        canvas.drawRightString(A4[0]-18*mm, 12*mm, f"Página {doc_.page}")
+        canvas.restoreState()
+
+    story = []
+    # capa simples
+    story.append(Paragraph(f"Relatórios — {nome_paciente}", h1))
+    story.append(Spacer(1, 8))
+
+    # parse simples do markdown
+    for ln in md_text.splitlines():
+        if ln.startswith("# "):
+            continue  # capa já criada
+        elif ln.startswith("## "):
+            story.append(Spacer(1, 6))
+            story.append(Paragraph(ln[3:], h2))
+        elif ln.strip() == "":
+            story.append(Spacer(1, 4))
+        else:
+            story.append(Paragraph(ln, p))
+
+    doc.build(story, onFirstPage=_header_footer, onLaterPages=_header_footer)
+    return buf.getvalue()
+
+def _preview_pdf_inline(pdf_bytes: bytes, filename: str):
+    """Pré-visualiza PDF com <object> (Chrome não bloqueia) + link de download."""
+    b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    # visualização inline
+    st.markdown(
+        f'<object data="data:application/pdf;base64,{b64}" type="application/pdf" '
+        f'width="100%" height="720px"></object>',
+        unsafe_allow_html=True,
+    )
+    # download direto
+    st.markdown(
+        f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">📥 Baixar PDF</a>',
+        unsafe_allow_html=True,
+    )
+
+# ---------- Relatórios ----------
 with tab_rel:
     st.subheader("Relatórios do paciente")
 
-    # filtros leves
-    colR1, colR2, colR3 = st.columns([1,1,1])
-    with colR1:
-        tipo_f = st.selectbox("Tipo", ["(todos)","Anamnese","Evolução","Avaliação","Alta","Outro"], index=0)
-    with colR2:
-        di = st.date_input("De", value=None)
-    with colR3:
-        df_ = st.date_input("Até", value=None)
+    # Filtros
+    colf1, colf2, colf3 = st.columns([1,1,2])
+    tipos = ["(todos)"] + sorted(df_rel_p.get("Tipo","").astype(str).str.strip().unique().tolist())
+    with colf1:
+        tipo_f = st.selectbox("Tipo", tipos, index=0)
+    with colf2:
+        de = st.date_input("De", value=None)
+    with colf3:
+        ate = st.date_input("Até", value=None)
 
-    lst = rel_cli.copy()
-    if not lst.empty:
-        lst["__dt"] = lst["Data"].apply(to_date)
-        if tipo_f != "(todos)":
-            lst = lst[lst["Tipo"].astype(str) == tipo_f]
-        if di:
-            lst = lst[lst["__dt"] >= di]
-        if df_:
-            lst = lst[lst["__dt"] <= df_]
-        lst = lst.sort_values("__dt", ascending=True)
+    rel_vis = df_rel_p.copy()
+    rel_vis["__dt"] = rel_vis.get("Data","").apply(to_date)
+    if tipo_f != "(todos)":
+        rel_vis = rel_vis[rel_vis.get("Tipo","").astype(str) == tipo_f]
+    if de:
+        rel_vis = rel_vis[rel_vis["__dt"] >= de]
+    if ate:
+        rel_vis = rel_vis[rel_vis["__dt"] <= ate]
+    rel_vis = rel_vis.sort_values("__dt", ascending=True)
 
-    ids_sel = st.multiselect(
-        "Selecionar relatórios para exportar",
-        options=(lst["RelatorioID"].astype(str).tolist() if not lst.empty else []),
-        format_func=lambda rid: (
-            f"{rid} · {lst.loc[lst['RelatorioID'].astype(str)==rid, 'Titulo'].values[0]}"
-            if (not lst.empty and (lst['RelatorioID'].astype(str)==rid).any()) else rid
-        )
-    )
+    # Lista compacta + seleção
+    opts, labels = [], {}
+    for _, r in rel_vis.iterrows():
+        rid = str(r.get("RelatorioID",""))
+        data_txt = r["__dt"].strftime(DATA_FMT) if pd.notna(r["__dt"]) else "-"
+        titulo = str(r.get("Titulo","")).strip() or "(sem título)"
+        lbl = f"🗂️ {data_txt} — {str(r.get('Tipo','')).strip() or '-'} · {titulo}"
+        opts.append(rid)
+        labels[rid] = lbl
 
-    # listagem com possibilidade de excluir
-    if lst.empty:
-        st.info("Sem relatórios no filtro atual.")
-    else:
-        for _, r in lst.iterrows():
-            rid = str(r.get("RelatorioID"))
-            with st.expander(f"🧾 {r.get('Data','--')} — {r.get('Tipo','-')} · {r.get('Titulo','(sem título)')}", expanded=False):
-                st.markdown(f"**Autor:** {r.get('Autor','-')}  ·  **Privado:** {r.get('Privado','Não')}")
-                st.write(r.get("Texto",""))
-                anex = str(r.get("AnexosURL","") or "").strip()
-                if anex:
-                    st.markdown(f"🔗 **Anexos:** {anex}")
-                cA, cB = st.columns([1,3])
-                with cA:
-                    conf = st.checkbox(f"Confirmar exclusão ({rid})", key=f"conf_rel_{rid}")
-                with cB:
-                    if st.button("🗑️ Excluir", key=f"del_rel_{rid}") and conf:
-                        try:
-                            idx = df_rel.index[df_rel["RelatorioID"].astype(str)==rid]
-                            if len(idx)>0:
-                                row = int(idx[0]) + 2
-                                ws_rel.delete_rows(row)
-                                st.success(f"Relatório {rid} excluído.")
-                                st.cache_data.clear()
-                                st.rerun()
-                        except Exception as e:
-                            st.error(f"Erro ao excluir: {e}")
+    sel = st.multiselect("Selecionar relatórios para exportar", opts, format_func=lambda x: labels.get(x, x))
 
-    # -------- exportação / envio --------
-    def _coletar_md(ids: list[str]) -> str:
-        base = rel_cli if not rel_cli.empty else df_rel[df_rel["PacienteID"].astype(str)==pid]
-        blocos = [f"# Relatórios — {nome_sel}", ""]
-        for rid in ids:
-            r = base[base["RelatorioID"].astype(str)==rid]
-            if r.empty: 
-                continue
-            rr = r.iloc[0]
-            blocos += [
-                f"## {rr.get('Data','--')} — {rr.get('Tipo','-')} · {rr.get('Titulo','(sem título)')}",
-                f"**Autor:** {rr.get('Autor','-')}  ·  **Privado:** {rr.get('Privado','Não')}",
-                "",
-                str(rr.get('Texto','')),
-                ""
-            ]
-        return "\n".join(blocos)
+    colbtn1, colbtn2, colbtn3, colbtn4, colbtn5 = st.columns([1,1,1,2,2])
+    with colbtn1:
+        md_ok = st.button("⬇️ MD", use_container_width=True)
+    with colbtn2:
+        pdf_ok = st.button("⬇️ PDF", use_container_width=True)
+    with colbtn3:
+        docx_ok = st.button("⬇️ DOCX", use_container_width=True)
+    with colbtn4:
+        tg_ok = st.button("📤 Enviar PDF ao Telegram", use_container_width=True)
+    with colbtn5:
+        prev_ok = st.button("👁️ Pré-visualizar no app", use_container_width=True)
 
-    def _gerar_pdf(md_text: str) -> bytes:
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.enums import TA_LEFT
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+    rows_sel = rel_vis[rel_vis["RelatorioID"].astype(str).isin(sel)].copy()
 
-        buf = BytesIO()
-        doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=40, rightMargin=40, topMargin=40, bottomMargin=40)
-        styles = getSampleStyleSheet()
-        h1 = ParagraphStyle('h1', parent=styles['Heading1'], alignment=TA_LEFT, spaceAfter=10)
-        h2 = ParagraphStyle('h2', parent=styles['Heading2'], alignment=TA_LEFT, spaceAfter=6)
-        p  = styles['BodyText']
+    if md_ok:
+        if rows_sel.empty:
+            st.warning("Selecione ao menos um relatório.")
+        else:
+            md_txt = _compose_md(rows_sel, nome_sel)
+            st.download_button("Baixar .md", data=md_txt.encode("utf-8"), file_name=f"relatorios_{pid}.md")
 
-        story = []
-        for ln in md_text.splitlines():
-            if ln.startswith("# "):   story.append(Paragraph(ln[2:], h1)); story.append(Spacer(1,8))
-            elif ln.startswith("## "): story.append(Paragraph(ln[3:], h2))
-            else:                      story.append(Paragraph(ln if ln.strip() else "&nbsp;", p))
-        doc.build(story)
-        return buf.getvalue()
+    if pdf_ok or tg_ok or prev_ok:
+        if rows_sel.empty:
+            st.warning("Selecione ao menos um relatório.")
+        else:
+            md_txt = _compose_md(rows_sel, nome_sel)
+            pdf_bytes = _gerar_pdf_pro(md_txt, nome_sel, CLINIC_NAME)
 
-    def _gerar_docx(md_text: str) -> bytes:
-        from docx import Document
-        doc = Document()
-        for ln in md_text.splitlines():
-            if ln.startswith("# "):   doc.add_heading(ln[2:], level=1)
-            elif ln.startswith("## "): doc.add_heading(ln[3:], level=2)
-            else:                      doc.add_paragraph(ln)
-        buf = BytesIO(); doc.save(buf); return buf.getvalue()
+            if pdf_ok:
+                st.download_button("Baixar PDF", data=pdf_bytes, file_name=f"relatorios_{pid}.pdf")
+            if tg_ok:
+                ok, err = tg_send_pdf(pdf_bytes, f"relatorios_{pid}.pdf", caption=f"Relatórios — {nome_sel}")
+                if ok: st.success("Enviado ao Telegram ✅")
+                else:  st.error(f"Falhou ao enviar: {err}")
+            if prev_ok:
+                _preview_pdf_inline(pdf_bytes, f"relatorios_{pid}.pdf")
 
-    colx1, colx2, colx3, colx4 = st.columns([1,1,1,2])
-    with colx1:
-        if st.button("⬇️ MD") and ids_sel:
-            md = _coletar_md(ids_sel).encode("utf-8")
-            st.download_button("Baixar .md", data=md, file_name=f"relatorios_{pid}.md",
-                               mime="text/markdown", use_container_width=True)
-    with colx2:
-        if st.button("⬇️ PDF") and ids_sel:
-            pdf_bytes = _gerar_pdf(_coletar_md(ids_sel))
-            st.download_button("Baixar PDF", data=pdf_bytes, file_name=f"relatorios_{pid}.pdf",
-                               mime="application/pdf", use_container_width=True)
-    with colx3:
-        if st.button("⬇️ DOCX") and ids_sel:
-            docx_bytes = _gerar_docx(_coletar_md(ids_sel))
-            st.download_button("Baixar DOCX", data=docx_bytes,
-                               file_name=f"relatorios_{pid}.docx",
-                               mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                               use_container_width=True)
-    with colx4:
-        if st.button("📤 Enviar PDF ao Telegram") and ids_sel:
-            pdf_bytes = _gerar_pdf(_coletar_md(ids_sel))
-            ok, err = tg_send_document(
-                data=pdf_bytes,
-                filename=f"relatorios_{pid}.pdf",
-                mime="application/pdf",
-                caption=f"Relatórios — {nome_sel}"
-            )
-            if ok: st.success("Enviado ao Telegram ✅")
-            else:  st.error(f"Falhou ao enviar: {err}")
+    if docx_ok:
+        if rows_sel.empty:
+            st.warning("Selecione ao menos um relatório.")
+        else:
+            try:
+                from docx import Document
+                doc = Document()
+                for _, r in rows_sel.iterrows():
+                    d = to_date(r.get("Data"))
+                    dtxt = d.strftime(DATA_FMT) if d else "-"
+                    doc.add_heading(str(r.get("Titulo","(sem título)")), level=1)
+                    doc.add_paragraph(f"{dtxt} • {str(r.get('Tipo','-'))} • {str(r.get('Autor','-'))}")
+                    doc.add_paragraph(str(r.get("Texto","")))
+                    url = str(r.get("ArquivoURL","")).strip()
+                    if url:
+                        doc.add_paragraph(f"Anexo: {url}")
+                    doc.add_page_break()
+                buf = io.BytesIO(); doc.save(buf)
+                st.download_button("Baixar DOCX", data=buf.getvalue(), file_name=f"relatorios_{pid}.docx")
+            except ImportError:
+                st.error("Faltou a dependência `python-docx` para gerar DOCX.")
 
     st.markdown("---")
     st.subheader("Novo relatório")
 
-    with st.form("novo_relatorio"):
+    # ====== Formulário de novo relatório ======
+    with st.form("novo_rel"):
         c1, c2 = st.columns([2,1])
         with c1:
             titulo = st.text_input("Título", "")
-            texto  = st.text_area("Texto (anotações, evolução, anamnese…)", height=220)
         with c2:
-            data_r = st.date_input("Data", value=date.today())
-            tipo   = st.selectbox("Tipo", ["Evolução","Anamnese","Avaliação","Alta","Outro"], index=0)
-            autor  = st.text_input("Autor", default_profissional())
-            privado = st.selectbox("Privado", ["Não","Sim"], index=0)
-            anexos = st.text_input("AnexosURL (opcional)", "")
+            data_rel = st.date_input("Data", value=date.today(), format="YYYY/MM/DD")
 
-        ok = st.form_submit_button("Salvar relatório")
-        if ok:
+        tipo = st.selectbox("Tipo", ["Evolução","Avaliação","Anamnese","Alta","Outro"], index=0)
+        autor = st.text_input("Autor", "Fernanda")
+        texto = st.text_area("Texto (anotações, evolução, anamnese...)", height=220)
+        arq_url = st.text_input("ArquivoURL (link opcional — Drive/Cloudinary)", "")
+
+        ok_save = st.form_submit_button("Salvar relatório")
+
+    if ok_save:
+        if not titulo.strip():
+            st.error("Informe o título.")
+        else:
             rid = new_id("R")
-            append_rows(ws_rel, [{
+            row = {
                 "RelatorioID": rid,
-                "PacienteID":  pid,
-                "Data":        data_r.strftime("%d/%m/%Y"),
-                "Tipo":        tipo,
-                "Titulo":      titulo.strip() or "(sem título)",
-                "Texto":       texto.strip(),
-                "Autor":       autor.strip() or default_profissional(),
-                "Privado":     privado,
-                "AnexosURL":   anexos.strip()
-            }], default_headers=REL_COLS)
+                "PacienteID": pid,
+                "Data": data_rel.strftime(DATA_FMT),
+                "Tipo": tipo,
+                "Titulo": titulo.strip(),
+                "Autor": (autor or "").strip() or "Equipe",
+                "Texto": (texto or "").strip(),
+                "ArquivoURL": (arq_url or "").strip(),
+            }
+            append_rows(ws_rel, [row], default_headers=REL_COLS)
             st.success(f"Relatório salvo ({rid}).")
             st.cache_data.clear()
             st.rerun()
 
-# =============== Sessões ===============
+# ---------- Sessões ----------
 with tab_ses:
     st.subheader("Sessões do paciente")
-    if ses_cli.empty:
-        st.info("Sem sessões registradas.")
+    if df_ses_p.empty:
+        st.info("Sem sessões.")
     else:
-        cols = ["Data","HoraInicio","HoraFim","Profissional","Status","Tipo","ObjetivosTrabalhados","Observacoes"]
-        cols = [c for c in cols if c in ses_cli.columns]
-        # ordena por data/hora crescente
-        tmp = ses_cli.copy()
-        tmp["__dt"] = tmp["Data"].apply(to_date)
-        tmp = tmp.sort_values(["__dt","HoraInicio"], ascending=True)
-        st.dataframe(tmp[cols], use_container_width=True, hide_index=True)
+        show_cols = ["Data","HoraInicio","HoraFim","Profissional","Status","Tipo","ObjetivosTrabalhados","Observacoes"]
+        show_cols = [c for c in show_cols if c in df_ses_p.columns]
+        df_ses_p["__ord_h"] = pd.to_datetime(df_ses_p.get("HoraInicio",""), format="%H:%M", errors="coerce")
+        df_ses_p2 = df_ses_p.sort_values(["__dt","__ord_h"], ascending=[True, True])
+        st.dataframe(df_ses_p2[show_cols], use_container_width=True, hide_index=True)
 
-# =============== Financeiro ===============
+# ---------- Financeiro ----------
 with tab_fin:
-    st.subheader("Recebimentos do paciente")
-    if pag_cli.empty:
-        st.info("Sem pagamentos registrados.")
+    st.subheader("Financeiro (recebido)")
+    if df_pag_p.empty:
+        st.info("Sem pagamentos.")
     else:
-        viz = pag_cli.copy()
-        viz["Liquido"] = viz["__brl"].apply(brl)
-        cols = ["Data","Forma","Bruto","Liquido","TaxaValor","Referencia","Obs"]
-        cols = [c for c in cols if c in viz.columns]
-        st.dataframe(viz[cols], use_container_width=True, hide_index=True)
-        st.metric("Total líquido", brl(float(pag_cli["__brl"].sum())))
+        show_cols = ["Data","Forma","Bruto","Liquido","TaxaValor","Referencia","Obs"]
+        show_cols = [c for c in show_cols if c in df_pag_p.columns]
+        st.dataframe(df_pag_p.sort_values("__dt")[show_cols], use_container_width=True, hide_index=True)
+        st.metric("Total líquido deste paciente", brl(float(df_pag_p['__liq'].sum())))
 
-# =============== Documentos (placeholder) ===============
+# ---------- Documentos ----------
 with tab_docs:
-    st.info("Anexe links de documentos no campo 'AnexosURL' dos relatórios. Integração de upload pode ser adicionada depois.")
+    st.subheader("Documentos & anexos")
+    st.info("Para anexar um link/arquivo, use o campo **ArquivoURL** ao criar um Relatório acima.\n\n"
+            "Se preferir uma aba dedicada 'Documentos' na planilha (ex.: colunas: PacienteID, Titulo, Data, URL, Obs), dá pra adicionar depois.")
+    rel_com_link = df_rel_p[df_rel_p.get("ArquivoURL","").astype(str).str.strip() != ""].copy()
+    if rel_com_link.empty:
+        st.caption("Nenhum link anexado ainda (ArquivoURL está vazio nos relatórios).")
+    else:
+        rel_com_link["__dt"] = rel_com_link.get("Data","").apply(to_date)
+        rel_com_link = rel_com_link.sort_values("__dt")
+        for _, r in rel_com_link.iterrows():
+            dtxt = (to_date(r.get("Data")).strftime(DATA_FMT) if to_date(r.get("Data")) else "-")
+            url = str(r.get("ArquivoURL")).strip()
+            titulo = (str(r.get("Titulo","")).strip() or "Documento")
+            autor = (str(r.get("Autor","")).strip() or nome_sel)
+            st.markdown(f"- **{dtxt}** — {autor} · [{titulo}]({url})")
