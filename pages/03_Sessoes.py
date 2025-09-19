@@ -38,6 +38,7 @@ def week_bounds(anchor: date):
     return start, end
 
 WEEKDAYS_PT = ["Segunda", "Terça", "Quarta", "Quinta", "Sexta", "Sábado", "Domingo"]
+STATUS_OPTS = ["Agendada","Confirmada","Realizada","Falta","Cancelada"]
 
 # ================= dados =================
 ss = connect()
@@ -120,7 +121,9 @@ except Exception:
 st.divider()
 
 # ================= abas =================
-tab_pontual, tab_rec, tab_edit = st.tabs(["📝 Agendar pontual", "🔁 Agendar recorrente", "🛠️ Editar / Apagar"])
+tab_pontual, tab_rec, tab_check, tab_edit = st.tabs(
+    ["📝 Agendar pontual", "🔁 Agendar recorrente", "✅ Check-in / Confirmação", "🛠️ Editar / Apagar"]
+)
 
 # ---------- Agendar pontual ----------
 with tab_pontual:
@@ -132,7 +135,7 @@ with tab_pontual:
         hi_txt = st.text_input("Hora início (HH:MM)", key="pont_hi")
         hf_txt = st.text_input("Hora fim (HH:MM)", key="pont_hf")
         prof = st.text_input("Profissional", "Terapeuta", key="pont_prof")
-        status = st.selectbox("Status", ["Agendada","Realizada","Falta","Cancelada"], index=0, key="pont_status")
+        status = st.selectbox("Status", STATUS_OPTS, index=0, key="pont_status")
         tipo = st.selectbox("Tipo", ["Terapia","Avaliação","Retorno"], index=0, key="pont_tipo")
         objetivos = st.text_input("Objetivos trabalhados (resumo)", key="pont_obj")
         obs = st.text_area("Observações", key="pont_obs")
@@ -146,8 +149,6 @@ with tab_pontual:
         if hf and to_min(hf) <= to_min(hi): st.error("**Hora fim** > **Hora início**."); st.stop()
 
         data_str = br_date(data_sel)
-
-        # trava duplicidade (mesmo paciente/dia e sobreposição)
         mesmo_dia = df_ses[(df_ses["PacienteID"].astype(str)==pid) & (df_ses["Data"].astype(str).str.strip()==data_str)]
         conflito = False
         for _, r in mesmo_dia.iterrows():
@@ -184,7 +185,7 @@ with tab_rec:
             data_ini = st.date_input("Início (primeira semana)", value=date.today(), key="rec_ini")
             semanas = st.number_input("Repetir por (semanas)", min_value=1, max_value=52, value=12, step=1, key="rec_rep")
             prof_r = st.text_input("Profissional", "Terapeuta", key="rec_prof")
-        status_r = st.selectbox("Status padrão", ["Agendada","Realizada","Falta","Cancelada"], index=0, key="rec_status")
+        status_r = st.selectbox("Status padrão", STATUS_OPTS, index=0, key="rec_status")
         tipo_r   = st.selectbox("Tipo", ["Terapia","Avaliação","Retorno"], index=0, key="rec_tipo")
         obs_r    = st.text_input("Observações (aplicadas a todas)", "Recorrente", key="rec_obs")
         ok_rec = st.form_submit_button("Criar sessões recorrentes")
@@ -226,6 +227,41 @@ with tab_rec:
         if puladas: st.info(f"⚠️ {len(puladas)} data(s) ignoradas por conflito.")
         st.cache_data.clear(); st.rerun()
 
+# ---------- Check-in / Confirmação ----------
+with tab_check:
+    st.markdown("### ✅ Check-in / Confirmação rápida")
+    colx, coly = st.columns([1,1])
+    with colx:
+        dia_chk = st.date_input("Dia", value=date.today(), key="chk_dia")
+    with coly:
+        filtro_prof = st.text_input("Filtrar por profissional (opcional)", "", key="chk_prof")
+
+    hoje_df = df_ses[df_ses["__d"] == dia_chk].merge(df_pac[["PacienteID","Nome"]], on="PacienteID", how="left")
+    if filtro_prof.strip():
+        hoje_df = hoje_df[hoje_df["Profissional"].astype(str).str.contains(filtro_prof.strip(), case=False, na=False)]
+    hoje_df = hoje_df.sort_values(["HoraInicio","Nome"])
+
+    if hoje_df.empty:
+        st.info("Sem sessões nesse dia.")
+    else:
+        for _, r in hoje_df.iterrows():
+            sid = r["SessaoID"]; rownum = int(r["__rownum"])
+            nome = r.get("Nome","-"); hi = r.get("HoraInicio","--"); hf = r.get("HoraFim","")
+            prof = r.get("Profissional",""); status_atual = r.get("Status","Agendada")
+            col1, col2, col3, col4, col5 = st.columns([3,1,1,1,1])
+            with col1:
+                st.markdown(f"**{nome}** — {hi}{('–'+hf) if hf else ''}  \n_{status_atual}_  • {prof}")
+            if col2.button("Confirmar", key=f"b_conf_{sid}"):
+                ws.update_cell(rownum, col_idx["Status"], "Confirmada"); st.cache_data.clear(); st.rerun()
+            if col3.button("Realizada", key=f"b_real_{sid}"):
+                ws.update_cell(rownum, col_idx["Status"], "Realizada"); st.cache_data.clear(); st.rerun()
+            if col4.button("Falta", key=f"b_falta_{sid}"):
+                ws.update_cell(rownum, col_idx["Status"], "Falta"); st.cache_data.clear(); st.rerun()
+            if col5.button("Cancelar", key=f"b_canc_{sid}"):
+                ws.update_cell(rownum, col_idx["Status"], "Cancelada"); st.cache_data.clear(); st.rerun()
+
+st.divider()
+
 # ---------- Editar / Apagar ----------
 with tab_edit:
     st.markdown("### 🛠️ Editar ou Apagar sessão")
@@ -252,24 +288,20 @@ with tab_edit:
         sid_sel, rownum = options.get(escolha, (None, None))
 
         if sid_sel and rownum:
-            # linha original
             linha = df_ses[df_ses["SessaoID"] == sid_sel].head(1).iloc[0]
 
             st.markdown(f"**Sessão:** `{sid_sel}`  •  Linha: {rownum}")
-
-            # ------- FORM DE EDIÇÃO -------
             with st.form("edit_form"):
                 data_e = st.date_input("Data", value=parse_br_date(linha["Data"]) or date.today())
                 hi_e = st.text_input("Hora início (HH:MM)", str(linha.get("HoraInicio","") or ""))
                 hf_e = st.text_input("Hora fim (HH:MM)", str(linha.get("HoraFim","") or ""))
                 prof_e = st.text_input("Profissional", str(linha.get("Profissional","") or "Terapeuta"))
 
-                status_opts = ["Agendada","Realizada","Falta","Cancelada"]
                 try:
-                    st_idx = status_opts.index(str(linha.get("Status","Agendada")))
+                    st_idx = STATUS_OPTS.index(str(linha.get("Status","Agendada")))
                 except ValueError:
                     st_idx = 0
-                status_e = st.selectbox("Status", status_opts, index=st_idx)
+                status_e = st.selectbox("Status", STATUS_OPTS, index=st_idx)
 
                 tipo_opts = ["Terapia","Avaliação","Retorno"]
                 try:
@@ -290,11 +322,9 @@ with tab_edit:
                 hi_v = parse_hhmm(hi_e)
                 hf_v = parse_hhmm(hf_e) if hf_e.strip() else None
                 if not hi_v:
-                    st.error("Hora início inválida.")
-                    st.stop()
+                    st.error("Hora início inválida."); st.stop()
                 if hf_v and to_min(hf_v) <= to_min(hi_v):
-                    st.error("**Hora fim** deve ser maior que **Hora início**.")
-                    st.stop()
+                    st.error("**Hora fim** deve ser maior que **Hora início**."); st.stop()
 
                 updates = [
                     ("Data", br_date(data_e)),
@@ -313,10 +343,9 @@ with tab_edit:
                         ws.update_cell(rownum, ci, val)
 
                 st.success("Sessão atualizada com sucesso.")
-                st.cache_data.clear()
-                st.rerun()
+                st.cache_data.clear(); st.rerun()
 
-            # ------- ETAPA 1: marcar exclusão pendente -------
+            # etapa 1: marcar exclusão pendente
             if pedir_apagar:
                 st.session_state["__pending_delete"] = {
                     "sid": sid_sel,
@@ -325,7 +354,7 @@ with tab_edit:
                 }
                 st.rerun()
 
-# ------- ETAPA 2: confirmar fora do form (não reseta) -------
+# etapa 2: confirmar fora do form
 pend = st.session_state.get("__pending_delete")
 if pend:
     st.error("⚠️ Confirma remover permanentemente a sessão abaixo?")
@@ -339,9 +368,7 @@ if pend:
             st.error(f"Erro ao apagar: {e}")
         finally:
             st.session_state.pop("__pending_delete", None)
-            st.cache_data.clear()
-            st.rerun()
+            st.cache_data.clear(); st.rerun()
     if col_x.button("❌ Cancelar", key="cancel_delete_btn", use_container_width=True):
         st.session_state.pop("__pending_delete", None)
-        st.info("Exclusão cancelada.")
-        st.rerun()
+        st.info("Exclusão cancelada."); st.rerun()
