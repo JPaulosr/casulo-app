@@ -77,9 +77,10 @@ def _tg_chat_id() -> str:
     return TELEGRAM_CHATID_FALLBACK
 
 def tg_ready() -> tuple[bool, bool, dict]:
+    """retorna (token_ok, chat_ok, info_debug) com chaves realmente lidas"""
     tok = _tg_token()
     cid = _tg_chat_id()
-    # tenta descobrir de onde veio (apenas para debug)
+    # fonte usada (debug)
     source_tok = "override" if st.session_state.get("TELEGRAM_TOKEN_OVERRIDE") else ("secrets/env" if tok else "MISSING")
     source_cid = "override" if st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE") else ("secrets/env" if cid else "MISSING")
     info = {
@@ -116,7 +117,8 @@ def tg_send_pdf(file_bytes: bytes, filename: str, caption: str = "") -> tuple[bo
 DATA_FMT = "%d/%m/%Y"
 
 def to_date(s):
-    if s is None: return None
+    if s is None:
+        return None
     s = str(s).strip()
     for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
         try:
@@ -127,7 +129,7 @@ def to_date(s):
 
 def brl(v: float) -> str:
     try:
-        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
+        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
         return "R$ 0,00"
 
@@ -191,16 +193,16 @@ pid = str(p["PacienteID"])
 # =========================
 # Header — foto + dados
 # =========================
-col1, col2 = st.columns([1,3])
+col1, col2 = st.columns([1, 3])
 with col1:
-    foto = str(p.get("FotoURL","")).strip()
+    foto = str(p.get("FotoURL", "")).strip()
     if foto:
-        st.image(foto, caption=p.get("Nome",""), width=260)
+        st.image(foto, caption=p.get("Nome", ""), width=260)
 with col2:
-    st.markdown(f"## {p.get('Nome','')}")
-    st.write(f"**Responsável:** {p.get('Responsavel','-')}  |  **Telefone:** {p.get('Telefone','-')}")
-    st.write(f"**Diagnóstico:** {p.get('Diagnostico','-')}")
-    st.write(f"**Convênio:** {p.get('Convenio','-')}  |  **Status:** {p.get('Status','-')}  |  **Prioridade:** {p.get('Prioridade','-')}")
+    st.markdown(f"## {p.get('Nome', '')}")
+    st.write(f"**Responsável:** {p.get('Responsavel', '-') }  |  **Telefone:** {p.get('Telefone', '-')}")
+    st.write(f"**Diagnóstico:** {p.get('Diagnostico', '-')}")
+    st.write(f"**Convênio:** {p.get('Convenio', '-') }  |  **Status:** {p.get('Status', '-') }  |  **Prioridade:** {p.get('Prioridade', '-')}")
     st.caption(f"ID interno: {pid}")
 
 st.divider()
@@ -212,12 +214,12 @@ df_ses_p = df_ses[df_ses["PacienteID"].astype(str) == pid].copy()
 df_pag_p = df_pag[df_pag["PacienteID"].astype(str) == pid].copy()
 df_rel_p = df_rel[df_rel["PacienteID"].astype(str) == pid].copy()
 
-df_ses_p["__dt"] = df_ses_p.get("Data","").apply(to_date)
-df_pag_p["__dt"] = df_pag_p.get("Data","").apply(to_date)
-df_pag_p["__liq"] = pd.to_numeric(df_pag_p.get("Liquido",0), errors="coerce").fillna(0)
+df_ses_p["__dt"] = df_ses_p.get("Data", "").apply(to_date)
+df_pag_p["__dt"] = df_pag_p.get("Data", "").apply(to_date)
+df_pag_p["__liq"] = pd.to_numeric(df_pag_p.get("Liquido", 0), errors="coerce").fillna(0)
 
 total_sessoes = int(len(df_ses_p))
-realizadas = int((df_ses_p.get("Status","").astype(str).str.lower() == "realizada").sum())
+realizadas = int((df_ses_p.get("Status", "").astype(str).str.lower() == "realizada").sum())
 recebido_liq = float(df_pag_p["__liq"].sum())
 qtd_relatorios = int(len(df_rel_p))
 ultima_sessao = df_ses_p["__dt"].dropna().max() if not df_ses_p.empty else None
@@ -233,37 +235,38 @@ k5.metric("Última sessão", ultima_sessao.strftime(DATA_FMT) if ultima_sessao e
 # Abas
 # =========================
 tab_visao, tab_rel, tab_ses, tab_fin, tab_docs = st.tabs(
-    ["👁️ Visão geral","📄 Relatórios","📝 Sessões","💰 Financeiro","📎 Documentos"]
+    ["👁️ Visão geral", "📄 Relatórios", "📝 Sessões", "💰 Financeiro", "📎 Documentos"]
 )
 
 # ---------- Visão geral ----------
 with tab_visao:
     st.subheader("Linha do tempo")
-    df_ses_p["__ord_h"] = pd.to_datetime(df_ses_p.get("HoraInicio",""), format="%H:%M", errors="coerce")
-    df_ses_p = df_ses_p.sort_values(["__dt","__ord_h"], ascending=[True, True])
+    df_ses_p["__ord_h"] = pd.to_datetime(df_ses_p.get("HoraInicio", ""), format="%H:%M", errors="coerce")
+    df_ses_p = df_ses_p.sort_values(["__dt", "__ord_h"], ascending=[True, True])
 
-    s_status = df_ses_p.get("Status","").astype(str).str.lower()
+    s_status = df_ses_p.get("Status", "").astype(str).str.lower()
     blocos = {
-        "Agendadas/Confirmadas": df_ses_p[s_status.isin(["agendada","confirmada"])],
+        "Agendadas/Confirmadas": df_ses_p[s_status.isin(["agendada", "confirmada"])],
         "Realizadas": df_ses_p[s_status == "realizada"],
         "Faltas": df_ses_p[s_status == "falta"],
         "Canceladas": df_ses_p[s_status == "cancelada"],
     }
 
     for titulo, bloco in blocos.items():
-        with st.expander(f"{titulo} ({len(bloco)})", expanded=(titulo=="Agendadas/Confirmadas")):
+        with st.expander(f"{titulo} ({len(bloco)})", expanded=(titulo == "Agendadas/Confirmadas")):
             if bloco.empty:
                 st.info("Nada aqui.")
             else:
                 for d, grupo in bloco.groupby("__dt"):
-                    if pd.isna(d): continue
+                    if pd.isna(d):
+                        continue
                     st.markdown(f"**{d.strftime(DATA_FMT)} — Sessão**")
                     for _, r in grupo.iterrows():
-                        hi = str(r.get("HoraInicio","") or "").strip()
-                        hf = str(r.get("HoraFim","") or "").strip()
-                        prof = str(r.get("Profissional","") or "")
-                        tipo = str(r.get("Tipo","Terapia") or "Terapia")
-                        st.markdown(f"**{tipo}**  \n{hi}{('–'+hf) if hf else ''} · {prof}")
+                        hi = str(r.get("HoraInicio", "") or "").strip()
+                        hf = str(r.get("HoraFim", "") or "").strip()
+                        prof = str(r.get("Profissional", "") or "")
+                        tipo = str(r.get("Tipo", "Terapia") or "Terapia")
+                        st.markdown(f"**{tipo}**  \n{hi}{('–' + hf) if hf else ''} · {prof}")
 
 # ---------- util: montar MD e gerar PDF PRO ----------
 def _compose_md(rows: pd.DataFrame, nome_paciente: str) -> str:
@@ -272,13 +275,13 @@ def _compose_md(rows: pd.DataFrame, nome_paciente: str) -> str:
         d = to_date(r.get("Data"))
         dtxt = d.strftime(DATA_FMT) if d else "-"
         parts += [
-            f"## {dtxt} — {str(r.get('Tipo','-'))} · {str(r.get('Titulo','(sem título)'))}",
-            f"**Autor:** {str(r.get('Autor','-'))}",
+            f"## {dtxt} — {str(r.get('Tipo', '-'))} · {str(r.get('Titulo', '(sem título)'))}",
+            f"**Autor:** {str(r.get('Autor', '-'))}",
             "",
-            str(r.get("Texto","")).strip(),
+            str(r.get("Texto", "")).strip(),
             "",
         ]
-        url = str(r.get("ArquivoURL","")).strip()
+        url = str(r.get("ArquivoURL", "")).strip()
         if url:
             parts += [f"**Anexo:** {url}", ""]
     return "\n".join(parts)
@@ -305,23 +308,27 @@ def _gerar_pdf_pro(md_text: str, nome_paciente: str, clinic_name: str) -> bytes:
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
-        buf, pagesize=A4,
-        leftMargin=18*mm, rightMargin=18*mm, topMargin=18*mm, bottomMargin=18*mm
+        buf,
+        pagesize=A4,
+        leftMargin=18 * mm,
+        rightMargin=18 * mm,
+        topMargin=18 * mm,
+        bottomMargin=18 * mm,
     )
     styles = getSampleStyleSheet()
-    h1 = ParagraphStyle('h1', parent=styles['Heading1'], alignment=TA_LEFT, spaceAfter=8, fontName=base_font)
-    h2 = ParagraphStyle('h2', parent=styles['Heading2'], alignment=TA_LEFT, spaceAfter=6, fontName=base_font)
-    p  = ParagraphStyle('p',  parent=styles['BodyText'],  leading=15, fontName=base_font)
+    h1 = ParagraphStyle("h1", parent=styles["Heading1"], alignment=TA_LEFT, spaceAfter=8, fontName=base_font)
+    h2 = ParagraphStyle("h2", parent=styles["Heading2"], alignment=TA_LEFT, spaceAfter=6, fontName=base_font)
+    p = ParagraphStyle("p", parent=styles["BodyText"], leading=15, fontName=base_font)
 
     def _header_footer(canvas, doc_):
         # Cabeçalho
         canvas.saveState()
         canvas.setFont(base_font, 10)
-        canvas.drawString(18*mm, A4[1]-12*mm, f"Relatórios — {nome_paciente}")
+        canvas.drawString(18 * mm, A4[1] - 12 * mm, f"Relatórios — {nome_paciente}")
         # Rodapé com nome da clínica e nº da página
         canvas.setFont(base_font, 10)
-        canvas.drawString(18*mm, 12*mm, clinic_name)
-        canvas.drawRightString(A4[0]-18*mm, 12*mm, f"Página {doc_.page}")
+        canvas.drawString(18 * mm, 12 * mm, clinic_name)
+        canvas.drawRightString(A4[0] - 18 * mm, 12 * mm, f"Página {doc_.page}")
         canvas.restoreState()
 
     story = []
@@ -350,7 +357,7 @@ def _preview_pdf_inline(pdf_bytes: bytes, filename: str):
     dataurl = f"data:application/pdf;base64,{b64}"
     st.components.v1.html(
         f'<iframe src="{dataurl}" width="100%" height="720px" style="border:none;"></iframe>',
-        height=740
+        height=740,
     )
     st.markdown(f"[Abrir em nova aba]({dataurl})")
 
@@ -359,8 +366,8 @@ with tab_rel:
     st.subheader("Relatórios do paciente")
 
     # Filtros
-    colf1, colf2, colf3 = st.columns([1,1,2])
-    tipos = ["(todos)"] + sorted(df_rel_p.get("Tipo","").astype(str).str.strip().unique().tolist())
+    colf1, colf2, colf3 = st.columns([1, 1, 2])
+    tipos = ["(todos)"] + sorted(df_rel_p.get("Tipo", "").astype(str).str.strip().unique().tolist())
     with colf1:
         tipo_f = st.selectbox("Tipo", tipos, index=0)
     with colf2:
@@ -369,9 +376,9 @@ with tab_rel:
         ate = st.date_input("Até", value=None)
 
     rel_vis = df_rel_p.copy()
-    rel_vis["__dt"] = rel_vis.get("Data","").apply(to_date)
+    rel_vis["__dt"] = rel_vis.get("Data", "").apply(to_date)
     if tipo_f != "(todos)":
-        rel_vis = rel_vis[rel_vis.get("Tipo","").astype(str) == tipo_f]
+        rel_vis = rel_vis[rel_vis.get("Tipo", "").astype(str) == tipo_f]
     if de:
         rel_vis = rel_vis[rel_vis["__dt"] >= de]
     if ate:
@@ -381,16 +388,16 @@ with tab_rel:
     # Lista compacta + seleção
     opts, labels = [], {}
     for _, r in rel_vis.iterrows():
-        rid = str(r.get("RelatorioID",""))
+        rid = str(r.get("RelatorioID", ""))
         data_txt = r["__dt"].strftime(DATA_FMT) if pd.notna(r["__dt"]) else "-"
-        titulo = str(r.get("Titulo","")).strip() or "(sem título)"
-        lbl = f"🗂️ {data_txt} — {str(r.get('Tipo','')).strip() or '-'} · {titulo}"
+        titulo = str(r.get("Titulo", "")).strip() or "(sem título)"
+        lbl = f"🗂️ {data_txt} — {str(r.get('Tipo', '')).strip() or '-'} · {titulo}"
         opts.append(rid)
         labels[rid] = lbl
 
     sel = st.multiselect("Selecionar relatórios para exportar", opts, format_func=lambda x: labels.get(x, x))
 
-    colbtn1, colbtn2, colbtn3, colbtn4, colbtn5 = st.columns([1,1,1,2,2])
+    colbtn1, colbtn2, colbtn3, colbtn4, colbtn5 = st.columns([1, 1, 1, 2, 2])
     with colbtn1:
         md_ok = st.button("⬇️ MD", use_container_width=True)
     with colbtn2:
@@ -402,42 +409,54 @@ with tab_rel:
     with colbtn5:
         prev_ok = st.button("👁️ Pré-visualizar no app", use_container_width=True)
 
-   with st.expander("🔧 Diagnóstico Telegram"):
-    token_ok, chat_ok, dbg = tg_ready()
-    st.write(f"Token OK? **{token_ok}** | ChatID OK? **{chat_ok}**")
-    st.caption(f"Fonte token: {dbg['token_source']} | Fonte chat: {dbg['chat_source']}")
-    if token_ok:
-        st.caption(f"Token (mascarado): {dbg['token_masked']}")
-    if chat_ok:
-        st.caption(f"Chat ID: {dbg['chat_id']}")
+    # ---------- Diagnóstico Telegram ----------
+    with st.expander("🔧 Diagnóstico Telegram"):
+        token_ok, chat_ok, dbg = tg_ready()
+        st.write(f"Token OK? **{token_ok}** | ChatID OK? **{chat_ok}**")
+        st.caption(f"Fonte token: {dbg['token_source']} | Fonte chat: {dbg['chat_source']}")
+        if token_ok:
+            st.caption(f"Token (mascarado): {dbg['token_masked']}")
+        if chat_ok:
+            st.caption(f"Chat ID: {dbg['chat_id']}")
 
-    # Mostra quais chaves de secrets estão disponíveis (NÃO mostra valores)
-    try:
-        st.caption("Chaves disponíveis em st.secrets (somente nomes):")
-        st.code(", ".join(sorted(list(st.secrets.keys()))))
-    except Exception as e:
-        st.caption(f"Não foi possível listar st.secrets ({e})")
-
-    st.divider()
-    st.caption("👉 Override temporário (útil se o deploy ainda não carregou os secrets):")
-    tok_in = st.text_input("Token do Bot (override temporário)", type="password", value=st.session_state.get("TELEGRAM_TOKEN_OVERRIDE", ""))
-    cid_in = st.text_input("Chat ID (override temporário)", value=st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE", ""))
-    if st.button("Aplicar overrides acima"):
-        st.session_state["TELEGRAM_TOKEN_OVERRIDE"] = tok_in.strip()
-        st.session_state["TELEGRAM_CHAT_ID_OVERRIDE"] = cid_in.strip()
-        st.success("Overrides aplicados. Clique em 'Testar' abaixo ou tente enviar o PDF.")
-
-    if st.button("Testar envio de mensagem"):
+        # Mostra nomes de chaves em st.secrets (não mostra valores)
         try:
-            url = f"https://api.telegram.org/bot{_tg_token()}/sendMessage"
-            payload = {"chat_id": _tg_chat_id(), "text": "Teste ✅ Página Paciente/Pacientes.", "parse_mode": "HTML"}
-            r = requests.post(url, json=payload, timeout=30)
-            if r.ok and r.json().get("ok"):
-                st.success("Mensagem enviada com sucesso ✅")
-            else:
-                st.error(f"Falhou: HTTP {r.status_code}: {r.text}")
+            st.caption("Chaves disponíveis em st.secrets (somente nomes):")
+            st.code(", ".join(sorted(list(st.secrets.keys()))))
         except Exception as e:
-            st.error(f"Erro: {e}")
+            st.caption(f"Não foi possível listar st.secrets ({e})")
+
+        st.divider()
+        st.caption("👉 Override temporário (útil se o deploy ainda não carregou os secrets):")
+        tok_in = st.text_input(
+            "Token do Bot (override temporário)",
+            type="password",
+            value=st.session_state.get("TELEGRAM_TOKEN_OVERRIDE", ""),
+        )
+        cid_in = st.text_input(
+            "Chat ID (override temporário)",
+            value=st.session_state.get("TELEGRAM_CHAT_ID_OVERRIDE", ""),
+        )
+        if st.button("Aplicar overrides acima"):
+            st.session_state["TELEGRAM_TOKEN_OVERRIDE"] = (tok_in or "").strip()
+            st.session_state["TELEGRAM_CHAT_ID_OVERRIDE"] = (cid_in or "").strip()
+            st.success("Overrides aplicados. Clique em 'Testar' abaixo ou tente enviar o PDF.")
+
+        if st.button("Testar envio de mensagem"):
+            try:
+                url = f"https://api.telegram.org/bot{_tg_token()}/sendMessage"
+                payload = {
+                    "chat_id": _tg_chat_id(),
+                    "text": "Teste ✅ Página Paciente/Pacientes.",
+                    "parse_mode": "HTML",
+                }
+                r = requests.post(url, json=payload, timeout=30)
+                if r.ok and r.json().get("ok"):
+                    st.success("Mensagem enviada com sucesso ✅")
+                else:
+                    st.error(f"Falhou: HTTP {r.status_code}: {r.text}")
+            except Exception as e:
+                st.error(f"Erro: {e}")
 
     rows_sel = rel_vis[rel_vis["RelatorioID"].astype(str).isin(sel)].copy()
 
@@ -460,8 +479,10 @@ with tab_rel:
                 st.download_button("Baixar PDF", data=pdf_bytes, file_name=f"relatorios_{pid}.pdf")
             if tg_ok:
                 ok, err = tg_send_pdf(pdf_bytes, f"relatorios_{pid}.pdf", caption=f"Relatórios — {nome_sel}")
-                if ok: st.success("Enviado ao Telegram ✅")
-                else:  st.error(f"Falhou ao enviar: {err}")
+                if ok:
+                    st.success("Enviado ao Telegram ✅")
+                else:
+                    st.error(f"Falhou ao enviar: {err}")
             if prev_ok:
                 _preview_pdf_inline(pdf_bytes, f"relatorios_{pid}.pdf")
 
@@ -475,14 +496,15 @@ with tab_rel:
                 for _, r in rows_sel.iterrows():
                     d = to_date(r.get("Data"))
                     dtxt = d.strftime(DATA_FMT) if d else "-"
-                    doc.add_heading(str(r.get("Titulo","(sem título)")), level=1)
-                    doc.add_paragraph(f"{dtxt} • {str(r.get('Tipo','-'))} • {str(r.get('Autor','-'))}")
-                    doc.add_paragraph(str(r.get("Texto","")))
-                    url = str(r.get("ArquivoURL","")).strip()
+                    doc.add_heading(str(r.get("Titulo", "(sem título)")), level=1)
+                    doc.add_paragraph(f"{dtxt} • {str(r.get('Tipo', '-'))} • {str(r.get('Autor', '-'))}")
+                    doc.add_paragraph(str(r.get("Texto", "")))
+                    url = str(r.get("ArquivoURL", "")).strip()
                     if url:
                         doc.add_paragraph(f"Anexo: {url}")
                     doc.add_page_break()
-                buf = io.BytesIO(); doc.save(buf)
+                buf = io.BytesIO()
+                doc.save(buf)
                 st.download_button("Baixar DOCX", data=buf.getvalue(), file_name=f"relatorios_{pid}.docx")
             except ImportError:
                 st.error("Faltou a dependência `python-docx` para gerar DOCX.")
@@ -492,13 +514,13 @@ with tab_rel:
 
     # ====== Formulário de novo relatório ======
     with st.form("novo_rel"):
-        c1, c2 = st.columns([2,1])
+        c1, c2 = st.columns([2, 1])
         with c1:
             titulo = st.text_input("Título", "")
         with c2:
             data_rel = st.date_input("Data", value=date.today(), format="YYYY/MM/DD")
 
-        tipo = st.selectbox("Tipo", ["Evolução","Avaliação","Anamnese","Alta","Outro"], index=0)
+        tipo = st.selectbox("Tipo", ["Evolução", "Avaliação", "Anamnese", "Alta", "Outro"], index=0)
         autor = st.text_input("Autor", "Fernanda")
         texto = st.text_area("Texto (anotações, evolução, anamnese...)", height=220)
         arq_url = st.text_input("ArquivoURL (link opcional — Drive/Cloudinary)", "")
@@ -531,10 +553,10 @@ with tab_ses:
     if df_ses_p.empty:
         st.info("Sem sessões.")
     else:
-        show_cols = ["Data","HoraInicio","HoraFim","Profissional","Status","Tipo","ObjetivosTrabalhados","Observacoes"]
+        show_cols = ["Data", "HoraInicio", "HoraFim", "Profissional", "Status", "Tipo", "ObjetivosTrabalhados", "Observacoes"]
         show_cols = [c for c in show_cols if c in df_ses_p.columns]
-        df_ses_p["__ord_h"] = pd.to_datetime(df_ses_p.get("HoraInicio",""), format="%H:%M", errors="coerce")
-        df_ses_p2 = df_ses_p.sort_values(["__dt","__ord_h"], ascending=[True, True])
+        df_ses_p["__ord_h"] = pd.to_datetime(df_ses_p.get("HoraInicio", ""), format="%H:%M", errors="coerce")
+        df_ses_p2 = df_ses_p.sort_values(["__dt", "__ord_h"], ascending=[True, True])
         st.dataframe(df_ses_p2[show_cols], use_container_width=True, hide_index=True)
 
 # ---------- Financeiro ----------
@@ -543,25 +565,27 @@ with tab_fin:
     if df_pag_p.empty:
         st.info("Sem pagamentos.")
     else:
-        show_cols = ["Data","Forma","Bruto","Liquido","TaxaValor","Referencia","Obs"]
+        show_cols = ["Data", "Forma", "Bruto", "Liquido", "TaxaValor", "Referencia", "Obs"]
         show_cols = [c for c in show_cols if c in df_pag_p.columns]
         st.dataframe(df_pag_p.sort_values("__dt")[show_cols], use_container_width=True, hide_index=True)
-        st.metric("Total líquido deste paciente", brl(float(df_pag_p['__liq'].sum())))
+        st.metric("Total líquido deste paciente", brl(float(df_pag_p["__liq"].sum())))
 
 # ---------- Documentos ----------
 with tab_docs:
     st.subheader("Documentos & anexos")
-    st.info("Para anexar um link/arquivo, use o campo **ArquivoURL** ao criar um Relatório acima.\n\n"
-            "Se preferir uma aba dedicada 'Documentos' na planilha (ex.: colunas: PacienteID, Titulo, Data, URL, Obs), dá pra adicionar depois.")
-    rel_com_link = df_rel_p[df_rel_p.get("ArquivoURL","").astype(str).str.strip() != ""].copy()
+    st.info(
+        "Para anexar um link/arquivo, use o campo **ArquivoURL** ao criar um Relatório acima.\n\n"
+        "Se preferir uma aba dedicada 'Documentos' na planilha (ex.: colunas: PacienteID, Titulo, Data, URL, Obs), dá pra adicionar depois."
+    )
+    rel_com_link = df_rel_p[df_rel_p.get("ArquivoURL", "").astype(str).str.strip() != ""].copy()
     if rel_com_link.empty:
         st.caption("Nenhum link anexado ainda (ArquivoURL está vazio nos relatórios).")
     else:
-        rel_com_link["__dt"] = rel_com_link.get("Data","").apply(to_date)
+        rel_com_link["__dt"] = rel_com_link.get("Data", "").apply(to_date)
         rel_com_link = rel_com_link.sort_values("__dt")
         for _, r in rel_com_link.iterrows():
             dtxt = (to_date(r.get("Data")).strftime(DATA_FMT) if to_date(r.get("Data")) else "-")
             url = str(r.get("ArquivoURL")).strip()
-            titulo = (str(r.get("Titulo","")).strip() or "Documento")
-            autor = (str(r.get("Autor","")).strip() or nome_sel)
+            titulo = (str(r.get("Titulo", "")).strip() or "Documento")
+            autor = (str(r.get("Autor", "")).strip() or nome_sel)
             st.markdown(f"- **{dtxt}** — {autor} · [{titulo}]({url})")
