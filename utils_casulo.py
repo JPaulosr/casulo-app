@@ -1,105 +1,55 @@
 # utils_casulo.py
-import json, unicodedata
 import streamlit as st
-import gspread
 import pandas as pd
-from google.oauth2.service_account import Credentials
 from gspread_dataframe import get_as_dataframe
-from datetime import datetime
+from gspread.exceptions import WorksheetNotFound, APIError
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.readonly",
-]
+# ... (demais imports e funções que você já tem)
 
-def _normalize_private_key(k: str) -> str:
-    return k.replace("\\n", "\n") if isinstance(k, str) else k
-
-def _norm(s: str) -> str:
-    s = (s or "").strip().casefold()
-    s = unicodedata.normalize("NFD", s)
-    return "".join(ch for ch in s if unicodedata.category(ch) != "Mn")
-
-@st.cache_resource(show_spinner=False)
-def connect():
-    # 1) Credenciais: aceita bloco TOML ou string JSON
-    sa_raw = st.secrets.get("gcp_service_account", None)
-    if not sa_raw:
-        st.error("`gcp_service_account` ausente em st.secrets.")
-        st.stop()
-
-    if isinstance(sa_raw, str):
+def read_ws(ss, title: str, expected_headers: list[str] | None = None, rows=2000, cols=50):
+    """
+    Abre (ou cria) uma worksheet por título e devolve (df, ws).
+    - Se a aba não existir, cria com o cabeçalho (se fornecido).
+    - Tenta ler com evaluate_formulas=True; se der APIError, tenta sem.
+    - Garante que todas as colunas em expected_headers existam no df.
+    """
+    try:
         try:
-            sa = json.loads(sa_raw)
-        except Exception:
-            st.error("`gcp_service_account` inválido (texto). Use JSON válido ou bloco TOML.")
-            st.stop()
-    else:
-        sa = dict(sa_raw)  # cópia mutável
+            ws = ss.worksheet(title)
+        except WorksheetNotFound:
+            ws = ss.add_worksheet(title=title, rows=rows, cols=max(cols, len(expected_headers or [])))
+            if expected_headers:
+                ws.update('1:1', [expected_headers])
 
-    sa["private_key"] = _normalize_private_key(sa.get("private_key", ""))
+        # 1ª tentativa: com evaluate_formulas
+        try:
+            df = get_as_dataframe(ws, evaluate_formulas=True, header=0).fillna("")
+        except APIError:
+            # 2ª tentativa: sem evaluate_formulas (algumas fórmulas quebram)
+            df = get_as_dataframe(ws, evaluate_formulas=False, header=0).fillna("")
 
-    creds = Credentials.from_service_account_info(sa, scopes=SCOPES)
-    gc = gspread.authorize(creds)
+        # Normaliza colunas
+        if expected_headers:
+            # cria colunas faltantes
+            for h in expected_headers:
+                if h not in df.columns:
+                    df[h] = ""
+            # reordena
+            df = df[expected_headers]
 
-    # 2) Sheet ID (SHEET_ID preferido; cai para PLANILHA_URL se existir)
-    sid = st.secrets.get("SHEET_ID", "")
-    if not sid:
-        url = st.secrets.get("PLANILHA_URL", "")
-        if "/d/" in url:
-            sid = url.split("/d/")[1].split("/")[0]
+        return df, ws
 
-    if not sid:
-        st.error("Defina `SHEET_ID` (ou `PLANILHA_URL`) nos secrets.")
-        st.stop()
-
-    try:
-        return gc.open_by_key(sid)
-    except gspread.SpreadsheetNotFound:
-        st.error("SpreadsheetNotFound: confira o SHEET_ID e se a planilha está compartilhada com o e-mail da Service Account (Editor).")
-        st.stop()
-
-def read_ws(ss, title, cols=None):
-    try:
-        ws = ss.worksheet(title)
-    except gspread.WorksheetNotFound:
-        ws = ss.add_worksheet(title=title, rows=5000, cols=max(10, (len(cols) if cols else 10)))
-        if cols:
-            ws.append_row(cols)
-
-    df = get_as_dataframe(ws, evaluate_formulas=True, header=0).fillna("")
-    df.columns = [str(c).strip() for c in df.columns]
-    df = df.loc[:, ~pd.Index(df.columns).duplicated(keep="first")]
-    if cols:
-        for c in cols:
-            if c not in df.columns:
-                df[c] = ""
-        df = df[cols + [c for c in df.columns if c not in cols]]
-    return df, ws
-
-def append_rows(ws, dicts, default_headers=None):
-    headers = ws.row_values(1)
-    if not headers:
-        headers = default_headers or sorted({k for d in dicts for k in d.keys()})
-        ws.append_row(headers)
-    hdr_norm = [unicodedata.normalize("NFKC", h).casefold() for h in headers]
-    rows = []
-    for d in dicts:
-        d_norm = {unicodedata.normalize("NFKC", k).casefold(): v for k, v in d.items()}
-        rows.append([d_norm.get(hn, "") for hn in hdr_norm])
-    if rows:
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
-
-def new_id(prefix):
-    return f"{prefix}-{datetime.now().strftime('%Y%m%d%H%M%S%f')[:-3]}"
-
-def foto_map(df_pac):
-    if "FotoURL" not in df_pac.columns:
-        return {}
-    out = {}
-    for _, r in df_pac.iterrows():
-        nome = str(r.get("Nome","")).strip()
-        url = str(r.get("FotoURL","")).strip()
-        if nome and url:
-            out[_norm(nome)] = url
-    return out
+    except APIError as e:
+        # mensagem mais amigável
+        with st.expander("Detalhes técnicos (Google Sheets)", expanded=False):
+            st.write(str(e))
+        st.error(
+            f"Não consegui ler a aba **{title}** na planilha.\n\n"
+            "Verifique:\n"
+            "• Se o arquivo/URL em `PLANILHA_URL` está correto;\n"
+            "• Se a planilha está compartilhada com o service account (Editor);\n"
+            "• Se a aba existe com esse nome exato.\n"
+        )
+        # devolve DF vazio para não derrubar a página
+        df_vazio = pd.DataFrame(columns=(expected_headers or []))
+        return df_vazio, None
