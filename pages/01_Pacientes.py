@@ -421,8 +421,8 @@ else:
             status = str(row.get("Status","")).strip() or "-"
             prio   = str(row.get("Prioridade","")).strip() or "-"
 
-            # 🔑 Key única para o expander
-            with st.expander(f"{nome} — {status} • {prio}", expanded=False, key=f"exp_{pid}_{i}"):
+            # ✅ st.expander SEM key
+            with st.expander(f"{nome} — {status} • {prio}", expanded=False):
                 cimg, cinfo = st.columns([1,3])
                 with cimg:
                     foto_url_show = _photo_or_logo(row.get("FotoURL"))
@@ -451,7 +451,7 @@ else:
                     st.markdown(f"**Observações:** {row.get('Observacoes') or '—'}")
 
                 # --------- Editor individual ----------
-                # 🔑 Key única para o form e para todos os inputs
+                # 🔑 Keys únicas no form e inputs
                 with st.form(f"edit_{pid}_{i}"):
                     st.markdown("**✏️ Editar cadastro**")
                     c1, c2 = st.columns(2)
